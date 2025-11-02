@@ -1,0 +1,380 @@
+!_TAG_FILE_FORMAT	2	/extended format; --format=1 will not append ;" to lines/
+!_TAG_FILE_SORTED	1	/0=unsorted, 1=sorted, 2=foldcase/
+!_TAG_PROGRAM_AUTHOR	Darren Hiebert	/dhiebert@users.sourceforge.net/
+!_TAG_PROGRAM_NAME	Exuberant Ctags	//
+!_TAG_PROGRAM_URL	http://ctags.sourceforge.net	/official site/
+!_TAG_PROGRAM_VERSION	5.8	//
+ACC_A_WAIT_CYCLE	gemmini_counter.h	51;"	d
+ACC_B_WAIT_CYCLE	gemmini_counter.h	52;"	d
+ACC_D_WAIT_CYCLE	gemmini_counter.h	53;"	d
+ACC_READ_SMALL_WIDTH	gemmini_params.h	80;"	d
+ACC_ROWS	gemmini_params.h	12;"	d
+ACC_ROWS	gemmini_params_ee290.h	11;"	d
+ACC_ROWS	gemmini_params_ee290_smallsp.h	11;"	d
+ACC_SCALE	gemmini_params.h	68;"	d
+ACC_SCALE_EXP_BITS	gemmini_params.h	77;"	d
+ACC_SCALE_IDENTITY	gemmini_params.h	38;"	d
+ACC_SCALE_SIG_BITS	gemmini_params.h	78;"	d
+ACC_SCALE_T_IS_FLOAT	gemmini_params.h	76;"	d
+ADDR_LEN	gemmini_params.h	9;"	d
+ADDR_LEN	gemmini_params_ee290.h	8;"	d
+ADDR_LEN	gemmini_params_ee290_smallsp.h	8;"	d
+A_GARBAGE_CYCLES	gemmini_counter.h	55;"	d
+BANK_NUM	gemmini_params.h	10;"	d
+BANK_NUM	gemmini_params_ee290.h	9;"	d
+BANK_NUM	gemmini_params_ee290_smallsp.h	9;"	d
+BANK_ROWS	gemmini_params.h	11;"	d
+BANK_ROWS	gemmini_params_ee290.h	10;"	d
+BANK_ROWS	gemmini_params_ee290_smallsp.h	10;"	d
+B_GARBAGE_CYCLES	gemmini_counter.h	56;"	d
+CONFIG_BERT	gemmini.h	56;"	d
+CONFIG_EX	gemmini.h	53;"	d
+CONFIG_LD	gemmini.h	54;"	d
+CONFIG_ST	gemmini.h	55;"	d
+COUNTER_H_	gemmini_counter.h	4;"	d
+CPU	gemmini.h	/^enum tiled_matmul_type_t {OS, WS, CPU}; \/\/ TODO rename this so it's name also applies to convs$/;"	e	enum:tiled_matmul_type_t
+ConvParams	gemmini_nn.h	/^struct ConvParams {$/;"	s
+DIM	gemmini_params.h	8;"	d
+DIM	gemmini_params_ee290.h	7;"	d
+DIM	gemmini_params_ee290_smallsp.h	7;"	d
+DISABLE	gemmini_counter.h	6;"	d
+DMA_TLB_HIT_REQ	gemmini_counter.h	30;"	d
+DMA_TLB_MISS_CYCLE	gemmini_counter.h	29;"	d
+DMA_TLB_TOTAL_REQ	gemmini_counter.h	31;"	d
+DS	gemmini.h	1531;"	d
+DS	gemmini.h	1710;"	d
+D_GARBAGE_CYCLES	gemmini_counter.h	57;"	d
+EXE_ACTIVE_CYCLE	gemmini_counter.h	41;"	d
+EXE_CONTROL_Q_BLOCK_CYCLE	gemmini_counter.h	43;"	d
+EXE_FLUSH_CYCLE	gemmini_counter.h	42;"	d
+EXE_OVERLAP_HAZ_CYCLE	gemmini_counter.h	45;"	d
+EXE_PRELOAD_HAZ_CYCLE	gemmini_counter.h	44;"	d
+FcParams	gemmini_nn.h	/^struct FcParams {$/;"	s
+GARBAGE_ADDR	gemmini.h	58;"	d
+GEMMINI_ACC_SCALE	gemmini.h	894;"	d
+GEMMINI_ACC_SCALE	gemmini.h	896;"	d
+GEMMINI_ASSERTIONS	gemmini.h	17;"	d
+GEMMINI_NN_H	gemmini_nn.h	2;"	d
+GEMMINI_PARAMS_H	gemmini_params.h	2;"	d
+GEMMINI_PARAMS_H	gemmini_params_ee290.h	2;"	d
+GEMMINI_PARAMS_H	gemmini_params_ee290_smallsp.h	2;"	d
+GEMMINI_SCALE	gemmini.h	1101;"	d
+GEMMINI_SCALE	gemmini.h	888;"	d
+GEMMINI_SCALE	gemmini.h	890;"	d
+HAS_FIRST_LAYER_OPTIMIZATIONS	gemmini_params.h	82;"	d
+HAS_MVIN_SCALE	gemmini_params.h	23;"	d
+HIST_IMAGES	gemmini_nn.h	48;"	d
+HIST_MATRIX	gemmini_nn.h	66;"	d
+I	gemmini_nn.h	/^    int I, J, K;$/;"	m	struct:ConvParams
+I	gemmini_nn.h	/^    int I, J, K;$/;"	m	struct:FcParams
+IGELU	gemmini.h	65;"	d
+IM2COL_ACTIVE_CYCLES	gemmini_counter.h	60;"	d
+IM2COL_MEM_CYCLES	gemmini_counter.h	59;"	d
+IM2COL_TRANSPOSER_WAIT_CYCLE	gemmini_counter.h	61;"	d
+INCREMENTAL_COUNTERS	gemmini_counter.h	8;"	d
+J	gemmini_nn.h	/^    int I, J, K;$/;"	m	struct:ConvParams
+J	gemmini_nn.h	/^    int I, J, K;$/;"	m	struct:FcParams
+K	gemmini_nn.h	/^    int I, J, K;$/;"	m	struct:ConvParams
+K	gemmini_nn.h	/^    int I, J, K;$/;"	m	struct:FcParams
+LAYERNORM	gemmini.h	64;"	d
+LOAD_ACTIVE_CYCLE	gemmini_counter.h	21;"	d
+LOAD_DMA_WAIT_CYCLE	gemmini_counter.h	20;"	d
+LOAD_SCRATCHPAD_WAIT_CYCLE	gemmini_counter.h	22;"	d
+LOOP_MATMUL_ACTIVE_CYCLES	gemmini_counter.h	66;"	d
+MAIN_EX_CYCLES	gemmini_counter.h	14;"	d
+MAIN_LD_CYCLES	gemmini_counter.h	12;"	d
+MAIN_LD_EX_CYCLES	gemmini_counter.h	16;"	d
+MAIN_LD_ST_CYCLES	gemmini_counter.h	15;"	d
+MAIN_LD_ST_EX_CYCLES	gemmini_counter.h	18;"	d
+MAIN_ST_CYCLES	gemmini_counter.h	13;"	d
+MAIN_ST_EX_CYCLES	gemmini_counter.h	17;"	d
+MAT_IS_EQUAL	gemmini_testutils.h	262;"	d
+MAX_BLOCK_LEN	gemmini_params.h	14;"	d
+MAX_BLOCK_LEN	gemmini_params_ee290.h	13;"	d
+MAX_BLOCK_LEN	gemmini_params_ee290_smallsp.h	13;"	d
+MAX_BLOCK_LEN_ACC	gemmini_params.h	15;"	d
+MAX_BLOCK_LEN_ACC	gemmini_params_ee290.h	14;"	d
+MAX_BLOCK_LEN_ACC	gemmini_params_ee290_smallsp.h	14;"	d
+MAX_BYTES	gemmini_params.h	13;"	d
+MAX_BYTES	gemmini_params_ee290.h	12;"	d
+MAX_BYTES	gemmini_params_ee290_smallsp.h	12;"	d
+MVIN_SCALE	gemmini_params.h	71;"	d
+MVIN_SCALE_ACC	gemmini_params.h	74;"	d
+MVIN_SCALE_IDENTITY	gemmini_params.h	36;"	d
+NO_ACTIVATION	gemmini.h	62;"	d
+OS	gemmini.h	/^enum tiled_matmul_type_t {OS, WS, CPU}; \/\/ TODO rename this so it's name also applies to convs$/;"	e	enum:tiled_matmul_type_t
+OUTPUT_STATIONARY	gemmini.h	59;"	d
+RDMA_ACTIVE_CYCLE	gemmini_counter.h	33;"	d
+RDMA_BYTES_REC	gemmini_counter.h	73;"	d
+RDMA_TLB_WAIT_CYCLES	gemmini_counter.h	34;"	d
+RDMA_TL_WAIT_CYCLES	gemmini_counter.h	35;"	d
+RDMA_TOTAL_LATENCY	gemmini_counter.h	76;"	d
+RELU	gemmini.h	63;"	d
+RESERVATION_STATION_ACTIVE_CYCLES	gemmini_counter.h	64;"	d
+RESERVATION_STATION_EX_COUNT	gemmini_counter.h	71;"	d
+RESERVATION_STATION_FULL_CYCLES	gemmini_counter.h	63;"	d
+RESERVATION_STATION_LD_COUNT	gemmini_counter.h	69;"	d
+RESERVATION_STATION_ST_COUNT	gemmini_counter.h	70;"	d
+ROCC_INSTRUCTION_RS1_RS2	gemmini.h	194;"	d
+ROUNDING_RIGHT_SHIFT	gemmini_params.h	41;"	d
+ROUNDING_RIGHT_SHIFT_BITS	gemmini_params.h	63;"	d
+ROUND_NEAR_EVEN	gemmini_params.h	52;"	d
+SAME_TYPE	gemmini_params.h	47;"	d
+SAME_TYPE	gemmini_params.h	49;"	d
+SCRATCHPAD_A_WAIT_CYCLE	gemmini_counter.h	47;"	d
+SCRATCHPAD_B_WAIT_CYCLE	gemmini_counter.h	48;"	d
+SCRATCHPAD_D_WAIT_CYCLE	gemmini_counter.h	49;"	d
+SOFTMAX	gemmini.h	66;"	d
+SRC_MAIN_C_ACCUMULATOR_H	accumulator.h	4;"	d
+SRC_MAIN_C_CHARACTER_H	character.h	4;"	d
+SRC_MAIN_C_GEMMINI_H	gemmini.h	4;"	d
+SRC_MAIN_C_GEMMINI_TESTUTILS_H	gemmini_testutils.h	4;"	d
+SRC_MAIN_C_TRANSLATOR_H	translator.h	4;"	d
+STORE_ACTIVE_CYCLE	gemmini_counter.h	25;"	d
+STORE_DMA_WAIT_CYCLE	gemmini_counter.h	24;"	d
+STORE_POOLING_CYCLE	gemmini_counter.h	26;"	d
+STORE_SCRATCHPAD_WAIT_CYCLE	gemmini_counter.h	27;"	d
+TRANSPOSE_PRELOAD_UNROLLER_ACTIVE_CYCLES	gemmini_counter.h	67;"	d
+UNDILATED	gemmini.h	1399;"	d
+UNDILATED	gemmini.h	1711;"	d
+WDMA_ACTIVE_CYCLE	gemmini_counter.h	37;"	d
+WDMA_BYTES_SENT	gemmini_counter.h	74;"	d
+WDMA_TLB_WAIT_CYCLES	gemmini_counter.h	38;"	d
+WDMA_TL_WAIT_CYCLES	gemmini_counter.h	39;"	d
+WDMA_TOTAL_LATENCY	gemmini_counter.h	77;"	d
+WEIGHT_STATIONARY	gemmini.h	60;"	d
+WS	gemmini.h	/^enum tiled_matmul_type_t {OS, WS, CPU}; \/\/ TODO rename this so it's name also applies to convs$/;"	e	enum:tiled_matmul_type_t
+XCUSTOM_ACC	accumulator.h	13;"	d
+XCUSTOM_ACC	gemmini_params.h	7;"	d
+XCUSTOM_CHAR	character.h	8;"	d
+XCUSTOM_TRANS	translator.h	8;"	d
+abs	gemmini.h	3419;"	d
+abs	gemmini.h	6;"	d
+abs	gemmini_testutils.h	283;"	d
+abs	gemmini_testutils.h	6;"	d
+acc_scale_t	gemmini_params.h	/^typedef float acc_scale_t;$/;"	t
+acc_scale_t_bits	gemmini_params.h	/^typedef uint32_t acc_scale_t_bits;$/;"	t
+acc_scale_t_bits_to_acc_scale_t	gemmini.h	/^static acc_scale_t acc_scale_t_bits_to_acc_scale_t(acc_scale_t_bits x) {$/;"	f
+acc_scale_t_to_acc_scale_t_bits	gemmini.h	/^static acc_scale_t_bits acc_scale_t_to_acc_scale_t_bits(acc_scale_t x) {$/;"	f
+acc_t	gemmini_params.h	/^typedef int32_t acc_t;$/;"	t
+acc_t	gemmini_params_ee290.h	/^typedef int32_t acc_t;$/;"	t
+acc_t	gemmini_params_ee290_smallsp.h	/^typedef int32_t acc_t;$/;"	t
+acc_t_bits_to_acc_t	gemmini.h	/^acc_t acc_t_bits_to_acc_t(acc_t_bits x) {$/;"	f
+acc_t_isnan	gemmini.h	/^bool acc_t_isnan(acc_t x) {$/;"	f
+acc_t_to_acc_t_bits	gemmini.h	/^acc_t_bits acc_t_to_acc_t_bits(acc_t x) {$/;"	f
+assert	gemmini_testutils.h	19;"	d
+assert	gemmini_testutils.h	20;"	d
+batch_size	gemmini_nn.h	/^    int batch_size;$/;"	m	struct:ConvParams
+batch_size	gemmini_nn.h	/^    int batch_size;$/;"	m	struct:FcParams
+bias	gemmini_nn.h	/^    bool bias;$/;"	m	struct:ConvParams
+bias	gemmini_nn.h	/^    bool bias;$/;"	m	struct:FcParams
+ceil_divide_int	gemmini.h	/^int ceil_divide_int(int a, int b){$/;"	f
+conv_cpu	gemmini.h	/^static void conv_cpu($/;"	f
+conv_cpu_without_pool	gemmini.h	/^static void conv_cpu_without_pool($/;"	f
+conv_dw	gemmini_nn.h	/^static void conv_dw(size_t I, size_t J,$/;"	f
+conv_dw_cpu	gemmini.h	/^static void conv_dw_cpu($/;"	f
+conv_dw_cpu_without_pool	gemmini.h	/^static void conv_dw_cpu_without_pool($/;"	f
+conv_dw_with_col2im	gemmini_nn.h	/^static void conv_dw_with_col2im(size_t prev_I, size_t prev_J, size_t I, size_t J,$/;"	f
+counter_configure	gemmini.h	/^static void counter_configure(size_t index, size_t counter_code) {$/;"	f
+counter_read	gemmini.h	/^static uint32_t counter_read(size_t index) {$/;"	f
+counter_reset	gemmini.h	/^static void counter_reset() {$/;"	f
+counter_snapshot_reset	gemmini.h	/^static void counter_snapshot_reset() {$/;"	f
+counter_snapshot_take	gemmini.h	/^static void counter_snapshot_take() {$/;"	f
+db_mats_in_acc	gemmini.h	1256;"	d
+db_mats_in_partition	gemmini.h	1255;"	d
+db_max_tile_i_j	gemmini.h	1257;"	d
+db_max_tile_k	gemmini.h	1258;"	d
+db_partition_rows	gemmini.h	1254;"	d
+depthwise	gemmini_nn.h	/^    bool depthwise;$/;"	m	struct:ConvParams
+doAccum	accumulator.h	21;"	d
+doLoad	accumulator.h	19;"	d
+doRead	accumulator.h	17;"	d
+doTranslate	translator.h	10;"	d
+doWrite	accumulator.h	15;"	d
+elem_t	gemmini_params.h	/^typedef int8_t elem_t;$/;"	t
+elem_t	gemmini_params_ee290.h	/^typedef int8_t elem_t;$/;"	t
+elem_t	gemmini_params_ee290_smallsp.h	/^typedef int8_t elem_t;$/;"	t
+elem_t_bits_to_elem_t	gemmini.h	/^elem_t elem_t_bits_to_elem_t(elem_t_bits x) {$/;"	f
+elem_t_isnan	gemmini.h	/^bool elem_t_isnan(elem_t x) {$/;"	f
+elem_t_max	gemmini_params.h	/^static const elem_t elem_t_max = 127;$/;"	v
+elem_t_max	gemmini_params_ee290.h	/^elem_t elem_t_max = 127;$/;"	v
+elem_t_max	gemmini_params_ee290_smallsp.h	/^elem_t elem_t_max = 127;$/;"	v
+elem_t_min	gemmini_params.h	/^static const elem_t elem_t_min = -128;$/;"	v
+elem_t_min	gemmini_params_ee290.h	/^elem_t elem_t_min = -128;$/;"	v
+elem_t_min	gemmini_params_ee290_smallsp.h	/^elem_t elem_t_min = -128;$/;"	v
+elem_t_to_elem_t_bits	gemmini.h	/^elem_t_bits elem_t_to_elem_t_bits(elem_t x) {$/;"	f
+full_t	gemmini_params.h	/^typedef int64_t full_t;$/;"	t
+full_t	gemmini_params_ee290.h	/^typedef int64_t full_t;$/;"	t
+full_t	gemmini_params_ee290_smallsp.h	/^typedef int64_t full_t;$/;"	t
+gemmini_block_mvin	gemmini.h	207;"	d
+gemmini_compute_accumulated	gemmini.h	229;"	d
+gemmini_compute_preloaded	gemmini.h	226;"	d
+gemmini_config_ex	gemmini.h	252;"	d
+gemmini_config_ld	gemmini.h	272;"	d
+gemmini_config_norm	gemmini.h	284;"	d
+gemmini_config_st	gemmini.h	281;"	d
+gemmini_counter_access	gemmini.h	295;"	d
+gemmini_extended2_config_ex	gemmini.h	246;"	d
+gemmini_extended2_config_ld	gemmini.h	266;"	d
+gemmini_extended2_config_st	gemmini.h	275;"	d
+gemmini_extended3_config_ex	gemmini.h	243;"	d
+gemmini_extended3_config_ld	gemmini.h	263;"	d
+gemmini_extended4_config_ld	gemmini.h	260;"	d
+gemmini_extended5_config_ld	gemmini.h	257;"	d
+gemmini_extended_compute_accumulated	gemmini.h	223;"	d
+gemmini_extended_compute_preloaded	gemmini.h	220;"	d
+gemmini_extended_config_ex	gemmini.h	249;"	d
+gemmini_extended_config_ld	gemmini.h	269;"	d
+gemmini_extended_config_st	gemmini.h	278;"	d
+gemmini_extended_mvin	gemmini.h	198;"	d
+gemmini_extended_mvin2	gemmini.h	201;"	d
+gemmini_extended_mvin3	gemmini.h	204;"	d
+gemmini_extended_mvout	gemmini.h	213;"	d
+gemmini_extended_preload	gemmini.h	233;"	d
+gemmini_fence	gemmini.h	292;"	d
+gemmini_flush	gemmini.h	288;"	d
+gemmini_loop_conv_ws	gemmini.h	360;"	d
+gemmini_loop_ws	gemmini.h	349;"	d
+gemmini_mvin	gemmini.h	210;"	d
+gemmini_mvout	gemmini.h	216;"	d
+gemmini_preload	gemmini.h	236;"	d
+gemmini_preload_zeros	gemmini.h	239;"	d
+global_average_cpu	gemmini.h	/^static void global_average_cpu(const elem_t * input, elem_t * output,$/;"	f
+im2col	gemmini_nn.h	/^static void im2col(size_t batch_size, size_t channels, size_t im_row_dim, size_t im_col_dim,$/;"	f
+im2col_with_col2im	gemmini_nn.h	/^static void im2col_with_col2im(size_t prev_I, size_t prev_J,$/;"	f
+in_channels	gemmini_nn.h	/^    int in_channels;$/;"	m	struct:ConvParams
+in_col_dim	gemmini_nn.h	/^    int in_col_dim;$/;"	m	struct:ConvParams
+in_features	gemmini_nn.h	/^    int in_features;$/;"	m	struct:FcParams
+in_row_dim	gemmini_nn.h	/^    int in_row_dim;$/;"	m	struct:ConvParams
+in_stride	gemmini_nn.h	/^    int in_stride;$/;"	m	struct:ConvParams
+int_sqrt	gemmini.h	/^static acc_t int_sqrt(acc_t n) {$/;"	f
+is_equal	gemmini_testutils.h	/^static int is_equal(elem_t x[DIM][DIM], elem_t y[DIM][DIM]) {$/;"	f
+is_equal_transposed	gemmini_testutils.h	/^static int is_equal_transposed(elem_t x[DIM][DIM], elem_t y[DIM][DIM]) {$/;"	f
+k_COMPUTE_ACCUMULATE	gemmini.h	30;"	d
+k_COMPUTE_PRELOADED	gemmini.h	29;"	d
+k_CONFIG	gemmini.h	25;"	d
+k_COUNTER	gemmini.h	43;"	d
+k_DO_ACCUM	accumulator.h	11;"	d
+k_DO_LOAD	accumulator.h	10;"	d
+k_DO_READ	accumulator.h	9;"	d
+k_DO_WRITE	accumulator.h	8;"	d
+k_FLUSH	gemmini.h	32;"	d
+k_LOOP_CONV_WS	gemmini.h	45;"	d
+k_LOOP_CONV_WS_CONFIG_1	gemmini.h	46;"	d
+k_LOOP_CONV_WS_CONFIG_2	gemmini.h	47;"	d
+k_LOOP_CONV_WS_CONFIG_3	gemmini.h	48;"	d
+k_LOOP_CONV_WS_CONFIG_4	gemmini.h	49;"	d
+k_LOOP_CONV_WS_CONFIG_5	gemmini.h	50;"	d
+k_LOOP_CONV_WS_CONFIG_6	gemmini.h	51;"	d
+k_LOOP_WS	gemmini.h	34;"	d
+k_LOOP_WS_CONFIG_ADDRS_AB	gemmini.h	36;"	d
+k_LOOP_WS_CONFIG_ADDRS_DC	gemmini.h	37;"	d
+k_LOOP_WS_CONFIG_BOUNDS	gemmini.h	35;"	d
+k_LOOP_WS_CONFIG_STRIDES_AB	gemmini.h	38;"	d
+k_LOOP_WS_CONFIG_STRIDES_DC	gemmini.h	39;"	d
+k_MVIN	gemmini.h	27;"	d
+k_MVIN2	gemmini.h	26;"	d
+k_MVIN3	gemmini.h	41;"	d
+k_MVOUT	gemmini.h	28;"	d
+k_PRELOAD	gemmini.h	31;"	d
+kernel_size	gemmini_nn.h	/^    int kernel_size;$/;"	m	struct:ConvParams
+matadd	gemmini_testutils.h	/^static void matadd(full_t sum[DIM][DIM], full_t m1[DIM][DIM], full_t m2[DIM][DIM]) {$/;"	f
+matmul	gemmini_testutils.h	/^static void matmul(elem_t A[DIM][DIM], elem_t B[DIM][DIM], elem_t D[DIM][DIM], full_t C_full[DIM][DIM]) {$/;"	f
+matmul_AB_transposed	gemmini_testutils.h	/^static void matmul_AB_transposed(elem_t A[DIM][DIM], elem_t B[DIM][DIM], elem_t D[DIM][DIM], full_t C_full[DIM][DIM]) {$/;"	f
+matmul_A_transposed	gemmini_testutils.h	/^static void matmul_A_transposed(elem_t A[DIM][DIM], elem_t B[DIM][DIM], elem_t D[DIM][DIM], full_t C_full[DIM][DIM]) {$/;"	f
+matmul_B_transposed	gemmini_testutils.h	/^static void matmul_B_transposed(elem_t A[DIM][DIM], elem_t B[DIM][DIM], elem_t D[DIM][DIM], full_t C_full[DIM][DIM]) {$/;"	f
+matmul_cpu	gemmini.h	/^static void matmul_cpu(bool transA, bool transB, size_t DIM_I, size_t DIM_J, size_t DIM_K,$/;"	f
+matmul_full	gemmini_testutils.h	/^static void matmul_full(elem_t A[DIM][DIM], elem_t B[DIM][DIM], full_t D[DIM][DIM], full_t C_full[DIM][DIM]) {$/;"	f
+matmul_full_AB_transposed	gemmini_testutils.h	/^static void matmul_full_AB_transposed(elem_t A[DIM][DIM], elem_t B[DIM][DIM], full_t D[DIM][DIM], full_t C_full[DIM][DIM]) {$/;"	f
+matmul_full_A_transposed	gemmini_testutils.h	/^static void matmul_full_A_transposed(elem_t A[DIM][DIM], elem_t B[DIM][DIM], full_t D[DIM][DIM], full_t C_full[DIM][DIM]) {$/;"	f
+matmul_full_B_transposed	gemmini_testutils.h	/^static void matmul_full_B_transposed(elem_t A[DIM][DIM], elem_t B[DIM][DIM], full_t D[DIM][DIM], full_t C_full[DIM][DIM]) {$/;"	f
+matmul_short	gemmini_testutils.h	/^static void matmul_short(elem_t A[DIM][DIM], elem_t B[DIM][DIM], elem_t D[DIM][DIM], elem_t C[DIM][DIM]) {$/;"	f
+matmul_short_AB_transposed	gemmini_testutils.h	/^static void matmul_short_AB_transposed(elem_t A[DIM][DIM], elem_t B[DIM][DIM], elem_t D[DIM][DIM], elem_t C[DIM][DIM]) {$/;"	f
+matmul_short_A_transposed	gemmini_testutils.h	/^static void matmul_short_A_transposed(elem_t A[DIM][DIM], elem_t B[DIM][DIM], elem_t D[DIM][DIM], elem_t C[DIM][DIM]) {$/;"	f
+matmul_short_B_transposed	gemmini_testutils.h	/^static void matmul_short_B_transposed(elem_t A[DIM][DIM], elem_t B[DIM][DIM], elem_t D[DIM][DIM], elem_t C[DIM][DIM]) {$/;"	f
+matrelu	gemmini_testutils.h	/^static void matrelu(elem_t in[DIM][DIM], elem_t out[DIM][DIM]) {$/;"	f
+mats_in_acc	gemmini.h	1249;"	d
+mats_in_acc	gemmini.h	1346;"	d
+mats_in_partition	gemmini.h	1248;"	d
+mats_in_partition	gemmini.h	1345;"	d
+matscale	gemmini_testutils.h	/^static void matscale(full_t full[DIM][DIM], elem_t out[DIM][DIM], acc_scale_t scale) {$/;"	f
+matshift	gemmini_testutils.h	/^static void matshift(full_t full[DIM][DIM], elem_t out[DIM][DIM], int shift) {$/;"	f
+max_tile_i_j	gemmini.h	1250;"	d
+max_tile_i_j	gemmini.h	1347;"	d
+max_tile_k	gemmini.h	1251;"	d
+max_tile_k	gemmini.h	1348;"	d
+n_patches	gemmini_nn.h	/^    int n_patches;$/;"	m	struct:ConvParams
+out_channels	gemmini_nn.h	/^    int out_channels;$/;"	m	struct:ConvParams
+out_col_dim	gemmini_nn.h	/^    int out_col_dim;$/;"	m	struct:ConvParams
+out_dim_pooled	gemmini_nn.h	/^    int pool_size, pool_stride, pool_padding, out_dim_pooled;$/;"	m	struct:ConvParams
+out_features	gemmini_nn.h	/^    int out_features;$/;"	m	struct:FcParams
+out_row_dim	gemmini_nn.h	/^    int out_row_dim;$/;"	m	struct:ConvParams
+out_stride	gemmini_nn.h	/^    int out_stride;$/;"	m	struct:ConvParams
+output_scale	gemmini_nn.h	/^    acc_scale_t output_scale;$/;"	m	struct:ConvParams
+output_scale	gemmini_nn.h	/^    acc_scale_t output_scale;$/;"	m	struct:FcParams
+padding	gemmini_nn.h	/^    int padding;$/;"	m	struct:ConvParams
+partition_rows	gemmini.h	1247;"	d
+partition_rows	gemmini.h	1344;"	d
+patch_size	gemmini_nn.h	/^    int patch_size;$/;"	m	struct:ConvParams
+pool	gemmini_nn.h	/^void pool(size_t batch_size, size_t channels, size_t in_row_dim, size_t in_col_dim,$/;"	f
+pool_padding	gemmini_nn.h	/^    int pool_size, pool_stride, pool_padding, out_dim_pooled;$/;"	m	struct:ConvParams
+pool_size	gemmini_nn.h	/^    int pool_size, pool_stride, pool_padding, out_dim_pooled;$/;"	m	struct:ConvParams
+pool_stride	gemmini_nn.h	/^    int pool_size, pool_stride, pool_padding, out_dim_pooled;$/;"	m	struct:ConvParams
+pool_with_col2im	gemmini_nn.h	/^void pool_with_col2im(size_t I, size_t J,$/;"	f
+printMatrix	gemmini_testutils.h	/^static void printMatrix(elem_t m[DIM][DIM]) {$/;"	f
+printMatrixAcc	gemmini_testutils.h	/^static void printMatrixAcc(acc_t m[DIM][DIM]) {$/;"	f
+rand	gemmini_testutils.h	/^int rand() {$/;"	f
+rand_double	gemmini_testutils.h	/^double rand_double() {$/;"	f
+read_cycles	gemmini_testutils.h	/^static uint64_t read_cycles() {$/;"	f
+res_scale	gemmini_nn.h	/^    scale_t res_scale;$/;"	m	struct:ConvParams
+resadd1	gemmini_nn.h	/^void resadd1(const size_t batch_size, const size_t channels, const size_t im_dim,$/;"	f
+resadd2	gemmini_nn.h	/^void resadd2(const size_t I, const size_t J,$/;"	f
+resadd3	gemmini_nn.h	/^void resadd3(const size_t I, const size_t J,$/;"	f
+resadd_cpu	gemmini.h	/^static void resadd_cpu(const size_t I, const size_t J,$/;"	f
+row_align	gemmini_params.h	33;"	d
+row_align	gemmini_params_ee290.h	22;"	d
+row_align	gemmini_params_ee290_smallsp.h	22;"	d
+row_align_acc	gemmini_params.h	34;"	d
+row_align_acc	gemmini_params_ee290.h	23;"	d
+row_align_acc	gemmini_params_ee290_smallsp.h	23;"	d
+scale_acc_t	gemmini_params.h	/^typedef int32_t scale_acc_t;$/;"	t
+scale_acc_t_bits	gemmini_params.h	/^typedef uint32_t scale_acc_t_bits;$/;"	t
+scale_acc_t_bits_to_scale_acc_t	gemmini.h	/^static scale_acc_t scale_acc_t_bits_to_scale_acc_t(scale_acc_t_bits x) {$/;"	f
+scale_acc_t_to_scale_acc_t_bits	gemmini.h	/^static scale_acc_t_bits scale_acc_t_to_scale_acc_t_bits(scale_acc_t x) {$/;"	f
+scale_and_sat	gemmini.h	/^static elem_t scale_and_sat(acc_t x, int act, acc_scale_t scale, acc_scale_t bert_scale) {$/;"	f
+scale_t	gemmini_params.h	/^typedef float scale_t;$/;"	t
+scale_t_bits	gemmini_params.h	/^typedef uint32_t scale_t_bits;$/;"	t
+scale_t_bits_to_scale_t	gemmini.h	/^static scale_t scale_t_bits_to_scale_t(scale_t_bits x) {$/;"	f
+scale_t_to_scale_t_bits	gemmini.h	/^static scale_t_bits scale_t_to_scale_t_bits(scale_t x) {$/;"	f
+scale_t_to_scale_t_bits	gemmini.h	149;"	d
+sp_tiled_conv	gemmini.h	/^static void sp_tiled_conv($/;"	f
+sp_tiled_global_average	gemmini.h	/^static void sp_tiled_global_average(const elem_t * input, elem_t * output,$/;"	f
+sp_tiled_matmul_os	gemmini.h	/^static void sp_tiled_matmul_os(const elem_t * A, const elem_t * B, const void * D, void * C,$/;"	f
+sp_tiled_matmul_ws	gemmini.h	/^static void sp_tiled_matmul_ws(const elem_t * A, const elem_t * B,$/;"	f
+sp_tiled_resadd	gemmini.h	/^static void sp_tiled_resadd(const size_t I, const size_t J,$/;"	f
+stride	gemmini_nn.h	/^    int stride;$/;"	m	struct:ConvParams
+tiled_conv	gemmini.h	/^static void tiled_conv($/;"	f
+tiled_conv_auto	gemmini.h	/^static void tiled_conv_auto($/;"	f
+tiled_conv_downsample	gemmini.h	/^static void tiled_conv_downsample($/;"	f
+tiled_conv_dw	gemmini.h	/^static void tiled_conv_dw($/;"	f
+tiled_conv_dw_auto	gemmini.h	/^static void tiled_conv_dw_auto($/;"	f
+tiled_conv_stride_auto	gemmini.h	/^static void tiled_conv_stride_auto($/;"	f
+tiled_conv_total_spad_rows	gemmini.h	/^static int tiled_conv_total_spad_rows(bool acc,$/;"	f
+tiled_conv_total_spad_rows_dw	gemmini.h	/^static int tiled_conv_total_spad_rows_dw(bool acc, bool weight,$/;"	f
+tiled_global_average	gemmini.h	/^static void tiled_global_average(const elem_t * input, elem_t * output,$/;"	f
+tiled_global_average_auto	gemmini.h	/^static void tiled_global_average_auto(const elem_t * input, elem_t * output,$/;"	f
+tiled_matmul	gemmini.h	/^static void tiled_matmul(size_t dim_I, size_t dim_J, size_t dim_K,$/;"	f
+tiled_matmul_auto	gemmini.h	/^static void tiled_matmul_auto(size_t dim_I, size_t dim_J, size_t dim_K,$/;"	f
+tiled_matmul_nn	gemmini_nn.h	/^static void tiled_matmul_nn(size_t dim_I, size_t dim_J, size_t dim_K,$/;"	f
+tiled_matmul_nn_auto	gemmini_nn.h	/^static void tiled_matmul_nn_auto(size_t dim_I, size_t dim_J, size_t dim_K, $/;"	f
+tiled_matmul_nn_stride_auto	gemmini_nn.h	/^static void tiled_matmul_nn_stride_auto(size_t dim_I, size_t dim_J, size_t dim_K,$/;"	f
+tiled_matmul_outer	gemmini.h	/^static void tiled_matmul_outer(size_t dim_I, size_t dim_J, size_t dim_K,$/;"	f
+tiled_matmul_total_acc_rows	gemmini.h	/^static size_t tiled_matmul_total_acc_rows(size_t I, size_t J) {$/;"	f
+tiled_matmul_total_spad_rows	gemmini.h	/^static size_t tiled_matmul_total_spad_rows(size_t I, size_t J, size_t K) {$/;"	f
+tiled_matmul_type_t	gemmini.h	/^enum tiled_matmul_type_t {OS, WS, CPU}; \/\/ TODO rename this so it's name also applies to convs$/;"	g
+tiled_resadd	gemmini.h	/^static void tiled_resadd(const size_t I, const size_t J,$/;"	f
+tiled_resadd_auto	gemmini.h	/^static void tiled_resadd_auto(const size_t I, const size_t J,$/;"	f
+tiled_resadd_stride_auto	gemmini.h	/^static void tiled_resadd_stride_auto(const size_t I, const size_t J,$/;"	f
+transpose	gemmini_testutils.h	/^static void transpose(elem_t in[DIM][DIM], elem_t out[DIM][DIM]) {$/;"	f
+vecadd	gemmini_nn.h	/^void vecadd(size_t len, const elem_t * A, const elem_t * B, elem_t * C, scale_t A_shift) {$/;"	f
+weight_stride	gemmini_nn.h	/^    int weight_stride;$/;"	m	struct:ConvParams
