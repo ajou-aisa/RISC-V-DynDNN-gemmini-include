@@ -1107,7 +1107,7 @@ static void matmul_cpu(bool transA, bool transB, size_t DIM_I, size_t DIM_J, siz
 #undef GEMMINI_SCALE
 
 // General matmul which can be run with different dataflows, or on the CPU
-enum tiled_matmul_type_t {OS, WS, CPU}; // TODO rename this so it's name also applies to convs
+enum tiled_matmul_type_t : int {OS, WS, CPU}; // TODO rename this so it's name also applies to convs
 
 // This function runs a tiled matrix mulctiplication, with hardcoded tiling
 // factors
