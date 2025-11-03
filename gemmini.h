@@ -24,6 +24,9 @@
 // Counter Definition
 #include "include/gemmini_counter.h"
 
+// llama.cpp의 args를 절대경로로 include 
+#include "~/firesim/deploy/overlay/llama.cpp/ggml/src/ggml-gemmini/ggml-gemmini-args.h"
+
 #define k_CONFIG 0
 #define k_MVIN2 1
 #define k_MVIN 2
@@ -1231,6 +1234,27 @@ static size_t tiled_matmul_total_spad_rows(size_t I, size_t J, size_t K) {
 
 static size_t tiled_matmul_total_acc_rows(size_t I, size_t J) {
   return (I * J) * DIM;
+}
+
+namespace aisa
+{
+  static void tiled_matmul_auto_fp(struct ggml_gemmini_args_t *args)
+  {
+    // TODO: tile size와 block size 매칭을 통해, tiled별 연산 결과를 dequantize해서 llama.cpp의 output으로 전달
+    
+
+    // tiled_matmul_auto 호출
+    tiled_matmul_auto(args.I, args.J, args.K,
+                      args.A, args.B, args.D, args.C,
+                      args.sA, args.sB, args.sD, args.sC,
+                      args.scale_A, args.scale_B, args.scale_D,
+                      args.act, args.scale, args.bert_scale,
+                      args.repeating_bias,
+                      args.transpose_A, args.transpose_B,
+                      args.full_C, args.low_D,
+                      args.weightA,
+                      args.tiled_matmul_type);
+  }
 }
 
 // This function runs a tiled matrix multiplication, with automatically
