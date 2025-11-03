@@ -1240,20 +1240,163 @@ namespace aisa
 {
   static void tiled_matmul_auto_fp(struct ggml_gemmini_args_t *args)
   {
-    // TODO: tile size와 block size 매칭을 통해, tiled별 연산 결과를 dequantize해서 llama.cpp의 output으로 전달
+    // tile size와 block size 매칭을 통해, tiled별 연산 결과를 dequantize해서 llama.cpp의 output으로 전달
+    if (args == NULL) {
+      return;
+    }
     
+    const size_t dim_I = args->I;
+    const size_t dim_J = args->J;
+    const size_t dim_K = args->K;
+    
+    const enum tiled_matmul_type_t tiled_matmul_type = args->tiled_matmul_type;
+    const int act = args->act;
+    
+    // gemmini 기본 auto tiling
+#define partition_rows (BANK_NUM * BANK_ROWS / 2)
+#define mats_in_partition (partition_rows / DIM)
+#define mats_in_acc (ACC_ROWS / DIM)
+#define max_tile_i_j ((size_t)sqrt(mats_in_acc))
+#define max_tile_k (mats_in_partition / max_tile_i_j)
 
-    // tiled_matmul_auto 호출
-    tiled_matmul_auto(args.I, args.J, args.K,
-                      args.A, args.B, args.D, args.C,
-                      args.sA, args.sB, args.sD, args.sC,
-                      args.scale_A, args.scale_B, args.scale_D,
-                      args.act, args.scale, args.bert_scale,
-                      args.repeating_bias,
-                      args.transpose_A, args.transpose_B,
-                      args.full_C, args.low_D,
-                      args.weightA,
-                      args.tiled_matmul_type);
+#define partition_rows (BANK_NUM * BANK_ROWS / 2)
+#define mats_in_partition (partition_rows / DIM)
+#define mats_in_acc (ACC_ROWS / DIM)
+#define max_tile_i_j ((size_t)sqrt(mats_in_acc))
+#define max_tile_k (mats_in_partition / max_tile_i_j)
+
+    // "db_" means "double-buffered"
+#define db_partition_rows ((BANK_NUM * BANK_ROWS / 2) / 2)
+#define db_mats_in_partition (db_partition_rows / DIM)
+#define db_mats_in_acc ((ACC_ROWS / 2) / DIM)
+#define db_max_tile_i_j ((size_t)sqrt(db_mats_in_acc))
+#define db_max_tile_k (db_mats_in_partition / db_max_tile_i_j)
+
+    // GEMMINI는 한 타일이 DIM(=16) 배수여야 하므로 논리 크기를 DIM에 맞춰 패딩
+    const size_t dim_I_padded = (dim_I / DIM + (dim_I % DIM != 0)) * DIM;
+    const size_t dim_J_padded = (dim_J / DIM + (dim_J % DIM != 0)) * DIM;
+    const size_t dim_K_padded = (dim_K / DIM + (dim_K % DIM != 0)) * DIM;
+
+    // WS 모드에서는 스크래치패드와 ACC를 두 세트로 나눠 번갈아 쓰기 때문에 최대 사용량이 절반으로 감소
+    const bool double_buffered = tiled_matmul_type == WS;
+
+    // auto tiler가 탐색할 최대 scratchpad/ACC 행 수를 미리 계산
+    const size_t max_spad_rows = double_buffered ? BANK_NUM * BANK_ROWS / 2 : BANK_NUM * BANK_ROWS;
+    const size_t max_acc_rows = double_buffered ? ACC_ROWS / 2 : ACC_ROWS;
+
+    // tile_I/tile_J/tile_K는 DIM 단위 매트릭스 개수(행렬 블록 수)
+    size_t tile_I, tile_J, tile_K;
+
+    if (act == LAYERNORM || act == SOFTMAX)
+    {
+      // 레이어정규화·소프트맥스는 누산 버퍼 전체에 한 행이 상주해야 하므로 I=1, K=1로 강제
+      tile_I = 1;
+      tile_J = dim_J_padded / DIM;
+      tile_K = 1;
+    }
+    else if (double_buffered)
+    {
+      // WS 모드: scratchpad/ACC 용량이 절반이므로 db_* 상수로 계산한 최대치와 실제 필요량 중 작은 값을 선택
+      tile_I = dim_I_padded / DIM < db_max_tile_i_j ? dim_I_padded / DIM : db_max_tile_i_j;
+      tile_J = dim_J_padded / DIM < db_max_tile_i_j ? dim_J_padded / DIM : db_max_tile_i_j;
+      tile_K = dim_K_padded / DIM < db_max_tile_k ? dim_K_padded / DIM : db_max_tile_k;
+    }
+    else
+    {
+      // OS 모드: 전체 scratchpad/ACC를 쓸 수 있으니 기본 max_* 한도와 비교
+      tile_I = dim_I_padded / DIM < max_tile_i_j ? dim_I_padded / DIM : max_tile_i_j;
+      tile_J = dim_J_padded / DIM < max_tile_i_j ? dim_J_padded / DIM : max_tile_i_j;
+      tile_K = dim_K_padded / DIM < max_tile_k ? dim_K_padded / DIM : max_tile_k;
+    }
+
+    // Fill scratchpad as much as possible
+    while (true)
+    {
+      bool increased = false;
+
+      // J 타일을 한 칸 늘렸을 때 scratchpad/ACC 제약을 넘지 않고 실제 행렬도 수용 가능하면 확장
+      if (tiled_matmul_total_spad_rows(tile_I, tile_J + 1, tile_K) <= max_spad_rows &&
+          tiled_matmul_total_acc_rows(tile_I, tile_J + 1) <= max_acc_rows &&
+          (tile_J + 1) * DIM <= dim_J_padded)
+      {
+        tile_J++;
+        increased = true;
+      }
+
+      // I 타일 확장: scratchpad에는 A, ACC에는 C가 늘어나므로 두 조건을 모두 만족해야 함
+      if (tiled_matmul_total_spad_rows(tile_I + 1, tile_J, tile_K) <= max_spad_rows &&
+          tiled_matmul_total_acc_rows(tile_I + 1, tile_J) <= max_acc_rows &&
+          (tile_I + 1) * DIM <= dim_I_padded)
+      {
+        tile_I++;
+        increased = true;
+      }
+
+      // K 타일 확장: scratchpad만 추가로 필요하므로 accumulator 조건은 확인하지 않음
+      if (tiled_matmul_total_spad_rows(tile_I, tile_J, tile_K + 1) <= max_spad_rows &&
+          (tile_K + 1) * DIM <= dim_K_padded)
+      {
+        tile_K++;
+        increased = true;
+      }
+
+      if (!increased)
+        break;
+    }
+
+    // tile size 디버깅
+    const char *layer_name = args->layer_name ? args->layer_name : "";
+    FILE *tile_log_fp = fopen(
+        "~/firesim/deploy/overlay/llama.cpp/ggml/src/ggml-gemmini/tile_log.txt", "a");
+    if (tile_log_fp != NULL) {
+      fprintf(tile_log_fp,
+              "[tiled_matmul_auto_fp][layer=%s] dim=(%zu,%zu,%zu) tiles=(%zu,%zu,%zu)\n",
+              layer_name, dim_I, dim_J, dim_K, tile_I, tile_J, tile_K);
+      fclose(tile_log_fp);
+    }
+
+    // TODO(K-block 1/5): tile_K는 Gemmini가 허용하는 최대 K-타일 개수이므로 block_size_k 루프의 upper bound로 사용.
+    // TODO(K-block 2/5): while (k_offset < dim_K) { block_K = min(block_size_k, dim_K - k_offset); ... } 구조를 추가해 K축을 블록 단위로 반복.
+    // TODO(K-block 3/5): 각 블록에서 A/B 부분타일을 복사하고 남는 영역은 0으로 패딩한 뒤 full_C=true로 tiled_matmul(dim_I, dim_J, block_K, ...) 호출.
+    // TODO(K-block 4/5): 첫 블록만 bias(D)를 전달하고 이후에는 NULL; acc_t 결과에 args->scale_A * block_scale * args->scale_out을 곱해 args->f_out에 누적.
+    // TODO(K-block 5/5): block_scale 인덱스는 block_idx * args->blocks_J + j를 사용하고, 루프 말미에 k_offset += block_K, block_idx++로 갱신.
+
+#ifdef PRINT_TILE
+#if PRINT_TILE
+    const int spad_rows = tiled_matmul_total_spad_rows(tile_I, tile_J, tile_K);
+    const int acc_rows = tiled_matmul_total_acc_rows(tile_I, tile_J);
+
+    printf("tile_I: %d\n", tile_I);
+    printf("tile_J: %d\n", tile_J);
+    printf("tile_K: %d\n\n", tile_K);
+
+    printf("spad_rows: %d\n", spad_rows);
+    printf("acc_rows: %d\n\n", acc_rows);
+
+    printf("spad_row utilization: %d%%\n", (spad_rows * 100) / max_spad_rows);
+    printf("acc_row utilization: %d%%\n\n", (acc_rows * 100) / max_acc_rows);
+
+    exit(EXIT_SUCCESS);
+#endif
+#endif
+
+    tiled_matmul(dim_I, dim_J, dim_K,
+                 args->A, args->B, args->D, args->C,
+                 args->sA, args->sB, args->sD, args->sC,
+                 args->scale_A, args->scale_B, args->scale_D,
+                 act, args->scale, args->bert_scale, args->repeating_bias,
+                 tile_I, tile_J, tile_K,
+                 args->transpose_A, args->transpose_B,
+                 args->full_C, args->low_D,
+                 args->weightA,
+                 tiled_matmul_type);
+
+#undef partition_rows
+#undef mats_in_partition
+#undef mats_in_acc
+#undef max_tile_i_j
+#undef max_tile_k
+
   }
 }
 
@@ -3463,4 +3606,3 @@ static void tiled_global_average_auto(const elem_t * input, elem_t * output,
 #undef abs
 
 #endif // SRC_MAIN_C_GEMMINI_H
-
