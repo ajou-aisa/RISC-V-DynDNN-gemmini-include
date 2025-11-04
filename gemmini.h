@@ -1349,7 +1349,7 @@ namespace aisa
     printf("start logging of tiling\n");
     const char *layer_name = args->layer_name ? args->layer_name : "";
     FILE *tile_log_fp = fopen(
-        "~/firesim/deploy/overlay/llama.cpp/ggml/src/ggml-gemmini/tile_log.txt", "a");
+        "/home/alveo/firesim/deploy/overlay/llama.cpp/ggml/src/ggml-gemmini/tile_log.txt", "a");
     if (tile_log_fp != NULL) {
       fprintf(tile_log_fp,
               "[tiled_matmul_auto_fp][layer=%s] dim=(%zu,%zu,%zu) tiles=(%zu,%zu,%zu)\n",
