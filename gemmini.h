@@ -1240,6 +1240,7 @@ namespace aisa
 {
   static void tiled_matmul_auto_fp(struct ggml_gemmini_args_t *args)
   {
+    printf("tiled_matmul_auto_fp called\n");
     // tile size와 block size 매칭을 통해, tiled별 연산 결과를 dequantize해서 llama.cpp의 output으로 전달
     if (args == NULL) {
       return;
@@ -1345,6 +1346,7 @@ namespace aisa
     }
 
     // tile size 디버깅
+    printf("start logging of tiling\n");
     const char *layer_name = args->layer_name ? args->layer_name : "";
     FILE *tile_log_fp = fopen(
         "~/firesim/deploy/overlay/llama.cpp/ggml/src/ggml-gemmini/tile_log.txt", "a");
