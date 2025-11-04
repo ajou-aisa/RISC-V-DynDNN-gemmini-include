@@ -11,6 +11,8 @@
 #include <math.h>
 #include <limits.h>
 #include <stdbool.h>
+#include <algorithm>
+#include <vector>
 
 #include "include/gemmini_params.h"
 
@@ -1348,13 +1350,84 @@ namespace aisa
     // tile size 디버깅
     printf("start logging of tiling\n");
     const char *layer_name = args->layer_name ? args->layer_name : "";
-    printf("[tiled_matmul_auto_fp][layer=%s] dim=(%zu,%zu,%zu) tiles=(%zu,%zu,%zu)\n", layer_name, dim_I, dim_J, dim_K, tile_I, tile_J, tile_K);
-    
-    // TODO(K-block 1/5): tile_K는 Gemmini가 허용하는 최대 K-타일 개수이므로 block_size_k 루프의 upper bound로 사용.
-    // TODO(K-block 2/5): while (k_offset < dim_K) { block_K = min(block_size_k, dim_K - k_offset); ... } 구조를 추가해 K축을 블록 단위로 반복.
-    // TODO(K-block 3/5): 각 블록에서 A/B 부분타일을 복사하고 남는 영역은 0으로 패딩한 뒤 full_C=true로 tiled_matmul(dim_I, dim_J, block_K, ...) 호출.
-    // TODO(K-block 4/5): 첫 블록만 bias(D)를 전달하고 이후에는 NULL; acc_t 결과에 args->scale_A * block_scale * args->scale_out을 곱해 args->f_out에 누적.
-    // TODO(K-block 5/5): block_scale 인덱스는 block_idx * args->blocks_J + j를 사용하고, 루프 말미에 k_offset += block_K, block_idx++로 갱신.
+    printf("[layer=%s][tiled_matmul_auto_fp] dim=(%zu,%zu,%zu) tiles=(%zu,%zu,%zu)\n",
+           layer_name, dim_I, dim_J, dim_K, tile_I, tile_J, tile_K);
+
+    // Gemmini가 항상 int32 누산기(acc)에서 결과를 내보내므로, 블록별 결과를 잠시 저장할 버퍼
+    // thread_local로 두어 호출마다 반복 alloc/free를 피함
+    static thread_local std::vector<acc_t> c_acc32;
+    c_acc32.resize(dim_I * dim_J);
+    acc_t *acc_ptr = c_acc32.data();
+
+    // 블록별로 float 결과를 누적할 때 편하게 더해 줄 수 있도록 fp32 출력 버퍼를 미리 0으로 클리어
+    float *f_out = args->f_out;
+    const size_t stride_f_out = args->stride_f_out;
+    if (f_out != nullptr) 
+      for (size_t i = 0; i < dim_I; ++i) 
+        std::fill(f_out + i * stride_f_out, f_out + i * stride_f_out + dim_J, 0.0f);
+
+    // Gemmini가 한 번에 소화할 수 있는 K 타일 수(max_block_elems)와 Q8_0 블록 크기(block_granularity)를 결합해 실제 한 반복에서 처리할 K 크기를 결정
+    const size_t max_block_elems = tile_K * DIM;
+    const size_t block_granularity = std::max<size_t>(1, args->block_size_k);
+    const size_t chunk_elems = std::min(max_block_elems, block_granularity);
+    GGML_ASSERT(chunk_elems > 0);
+
+    // 가중치 스케일 테이블은 (blocks_K x blocks_J) 크기. 범위 체크에 사용.
+    const size_t total_scale_elems = args->blocks_K * args->blocks_J;
+
+    size_t k_offset = 0;
+    size_t block_idx = 0;
+    bool first_block = true;
+
+    while (k_offset < dim_K) {
+      const size_t remaining_k = dim_K - k_offset; // 아직 처리되지 않은 K 길이
+      const size_t block_K = std::min(chunk_elems, remaining_k); // 이번 반복에서 실제로 계산에 사용할 K 요소 개수
+      const size_t block_tiles = (block_K + DIM - 1) / DIM; // block_K를 DIM 크기 타일로 나눴을 때 필요한 타일 수
+      const size_t block_tile_K = std::max<size_t>(1, std::min(tile_K, block_tiles)); // auto tiler가 제안한 tile_K와 현재 블록에 필요한 타일 수 중 작은 값 (최소 1)
+
+      // 이전 블록에서 남아있는 잔여 값을 제거하고 fresh accumulation을 수행.
+      std::fill(c_acc32.begin(), c_acc32.end(), 0);
+
+      // A,B는 row-major 형태이므로 현재 K 블록만큼 쉬프트한 포인터를 넘김
+      // bias(D)는 첫 반복에서만 전달해 중복 더하기를 회피
+      const elem_t *A_block = args->A + k_offset;
+      const elem_t *B_block = args->B + k_offset;
+      const void *D_block = first_block ? args->D : nullptr;
+
+      // auto tiling으로 선정된 K 타일을 block에 매칭하여 block_tile_K를 사용해 호출
+      tiled_matmul(dim_I, dim_J, block_K,
+                   A_block, B_block, D_block, acc_ptr,
+                   args->sA, args->sB, args->sD, dim_J,
+                   args->scale_A, args->scale_B, args->scale_D,
+                   act, args->scale, args->bert_scale, args->repeating_bias,
+                   tile_I, tile_J, block_tile_K,
+                   args->transpose_A, args->transpose_B,
+                   true, args->low_D,
+                   args->weightA,
+                   tiled_matmul_type);
+
+      // Gemmini의 int32(acc_t) 결과를 float로 dequantize
+      if (f_out != nullptr) {
+        for (size_t i = 0; i < dim_I; ++i) {
+          const acc_t *row_acc = acc_ptr + i * dim_J;
+          float *row_out = f_out + i * stride_f_out;
+          for (size_t j = 0; j < dim_J; ++j) {
+            float scale_w = 1.0f;
+            if (args->B_scales && block_idx < args->blocks_K) {
+              const size_t scale_idx = block_idx * args->blocks_J + j;
+              if (scale_idx < total_scale_elems) 
+                scale_w = args->B_scales[scale_idx];
+            }
+            float scale_out = args->scale_A*scale_w;
+            row_out[j] += static_cast<float>(row_acc[j]) * scale_out;
+          }
+        }
+      }
+
+      k_offset += block_K;
+      ++block_idx;
+      first_block = false;
+    }
 
 #ifdef PRINT_TILE
 #if PRINT_TILE
@@ -1374,17 +1447,6 @@ namespace aisa
     exit(EXIT_SUCCESS);
 #endif
 #endif
-
-    tiled_matmul(dim_I, dim_J, dim_K,
-                 args->A, args->B, args->D, args->C,
-                 args->sA, args->sB, args->sD, args->sC,
-                 args->scale_A, args->scale_B, args->scale_D,
-                 act, args->scale, args->bert_scale, args->repeating_bias,
-                 tile_I, tile_J, tile_K,
-                 args->transpose_A, args->transpose_B,
-                 args->full_C, args->low_D,
-                 args->weightA,
-                 tiled_matmul_type);
 
 #undef partition_rows
 #undef mats_in_partition
