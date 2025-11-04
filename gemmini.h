@@ -1348,15 +1348,8 @@ namespace aisa
     // tile size 디버깅
     printf("start logging of tiling\n");
     const char *layer_name = args->layer_name ? args->layer_name : "";
-    FILE *tile_log_fp = fopen(
-        "/home/alveo/firesim/deploy/overlay/llama.cpp/ggml/src/ggml-gemmini/tile_log.txt", "a");
-    if (tile_log_fp != NULL) {
-      fprintf(tile_log_fp,
-              "[tiled_matmul_auto_fp][layer=%s] dim=(%zu,%zu,%zu) tiles=(%zu,%zu,%zu)\n",
-              layer_name, dim_I, dim_J, dim_K, tile_I, tile_J, tile_K);
-      fclose(tile_log_fp);
-    }
-
+    printf("[tiled_matmul_auto_fp][layer=%s] dim=(%zu,%zu,%zu) tiles=(%zu,%zu,%zu)\n", layer_name, dim_I, dim_J, dim_K, tile_I, tile_J, tile_K);
+    
     // TODO(K-block 1/5): tile_K는 Gemmini가 허용하는 최대 K-타일 개수이므로 block_size_k 루프의 upper bound로 사용.
     // TODO(K-block 2/5): while (k_offset < dim_K) { block_K = min(block_size_k, dim_K - k_offset); ... } 구조를 추가해 K축을 블록 단위로 반복.
     // TODO(K-block 3/5): 각 블록에서 A/B 부분타일을 복사하고 남는 영역은 0으로 패딩한 뒤 full_C=true로 tiled_matmul(dim_I, dim_J, block_K, ...) 호출.
