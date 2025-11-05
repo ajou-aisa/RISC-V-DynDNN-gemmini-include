@@ -1625,7 +1625,6 @@ namespace aisa
     }
 
     // tile size 디버깅
-    printf("start logging of tiling\n");
     const char *layer_name = args->layer_name ? args->layer_name : "";
     printf("[layer=%s][tiled_matmul_auto_fp] dim=(%zu,%zu,%zu) tiles=(%zu,%zu,%zu)\n",
            layer_name, dim_I, dim_J, dim_K, tile_I, tile_J, tile_K);
@@ -1667,6 +1666,11 @@ namespace aisa
 
       // 이전 블록에서 남아있는 잔여 값을 제거하고 fresh accumulation을 수행.
       std::fill(c_acc32.begin(), c_acc32.end(), 0);
+
+      if (cpu_fallback) {
+        printf("[layer=%s][cpu_fallback] block_idx=%zu k_offset=%zu block_K=%zu tile_K=%zu sA=%zu sB=%zu\n",
+               layer_name, block_idx, k_offset, block_K, block_tile_K, args->sA, args->sB);
+      }
 
       // A,B는 row-major 형태이므로 현재 K 블록만큼 쉬프트한 포인터를 넘김
       // bias(D)는 첫 반복에서만 전달해 중복 더하기를 회피
@@ -1714,9 +1718,17 @@ namespace aisa
               const size_t scale_idx = block_idx * args->blocks_J + j;
               if (scale_idx < total_scale_elems)
                 scale_w = args->B_scales[scale_idx];
+              if (cpu_fallback && j < 4) {
+                printf("[layer=%s][cpu_fallback] block_idx=%zu j=%zu scale_idx=%zu scale=%.6f\n",
+                       layer_name, block_idx, j, scale_idx, scale_w);
+              }
             }
             float scale_out = args->scale_A * scale_w;
             row_out[j] += static_cast<float>(row_acc32[j]) * scale_out;
+            if (cpu_fallback && j < 4) {
+              printf("[layer=%s][cpu_fallback] row=%zu col=%zu acc=%d scaled=%.6f\n",
+                     layer_name, i, j, row_acc32[j], static_cast<float>(row_acc32[j]) * scale_out);
+            }
           }
         }
       }
