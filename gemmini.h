@@ -1106,6 +1106,149 @@ static void matmul_cpu(bool transA, bool transB, size_t DIM_I, size_t DIM_J, siz
   }
 }
 
+namespace aisa
+{
+  static void matmul_cpu_int32(bool transA, bool transB, size_t DIM_I, size_t DIM_J, size_t DIM_K,
+                               const elem_t *A, const elem_t *B, const acc_t *D,
+                               void *C,
+                               size_t stride_A, size_t stride_B, size_t stride_D, size_t stride_C,
+                               scale_t A_scale_factor, scale_t B_scale_factor, scale_acc_t D_scale_factor,
+                               int act, acc_scale_t scale, acc_scale_t bert_scale, bool repeating_bias,
+                               bool full_C)
+  {
+
+    if (!full_C)
+    {
+      matmul_cpu(transA, transB, DIM_I, DIM_J, DIM_K,
+                 A, B, D, (elem_t *)C,
+                 stride_A, stride_B, stride_D, stride_C,
+                 A_scale_factor, B_scale_factor, D_scale_factor,
+                 act, scale, bert_scale, repeating_bias);
+      return;
+    }
+
+    if (act != NO_ACTIVATION)
+    {
+      printf("[matmul_cpu_int32] Expected NO_ACTIVATION but got act=%d (full_C-only path)\n", act);
+      exit(1);
+    }
+
+    const int no_bias = D == NULL;
+    acc_t *C_acc = (acc_t *)C;
+
+    if (!transA && !transB && DIM_I % 4 == 0 && DIM_J % 4 == 0)
+    {
+      for (size_t i = 0; i < DIM_I; i += 4)
+      {
+        for (size_t j = 0; j < DIM_J; j += 4)
+        {
+
+          acc_t result[4][4];
+
+          for (size_t ii = 0; ii < 4; ii++)
+            for (size_t jj = 0; jj < 4; jj++)
+            {
+              const size_t bias_row = repeating_bias ? 0 : i + ii;
+              result[ii][jj] = no_bias ? 0 : GEMMINI_ACC_SCALE(*(D + bias_row * stride_D + j + jj), D_scale_factor);
+            }
+
+          for (size_t k = 0; k < DIM_K; k++)
+          {
+            result[0][0] +=
+                GEMMINI_SCALE(*(A + i * stride_A + k), A_scale_factor) *
+                GEMMINI_SCALE(*(B + k * stride_B + j), B_scale_factor);
+            result[0][1] +=
+                GEMMINI_SCALE(*(A + i * stride_A + k), A_scale_factor) *
+                GEMMINI_SCALE(*(B + k * stride_B + j + 1), B_scale_factor);
+            result[0][2] +=
+                GEMMINI_SCALE(*(A + i * stride_A + k), A_scale_factor) *
+                GEMMINI_SCALE(*(B + k * stride_B + j + 2), B_scale_factor);
+            result[0][3] +=
+                GEMMINI_SCALE(*(A + i * stride_A + k), A_scale_factor) *
+                GEMMINI_SCALE(*(B + k * stride_B + j + 3), B_scale_factor);
+            result[1][0] +=
+                GEMMINI_SCALE(*(A + (i + 1) * stride_A + k), A_scale_factor) *
+                GEMMINI_SCALE(*(B + k * stride_B + j), B_scale_factor);
+            result[1][1] +=
+                GEMMINI_SCALE(*(A + (i + 1) * stride_A + k), A_scale_factor) *
+                GEMMINI_SCALE(*(B + k * stride_B + j + 1), B_scale_factor);
+            result[1][2] +=
+                GEMMINI_SCALE(*(A + (i + 1) * stride_A + k), A_scale_factor) *
+                GEMMINI_SCALE(*(B + k * stride_B + j + 2), B_scale_factor);
+            result[1][3] +=
+                GEMMINI_SCALE(*(A + (i + 1) * stride_A + k), A_scale_factor) *
+                GEMMINI_SCALE(*(B + k * stride_B + j + 3), B_scale_factor);
+            result[2][0] +=
+                GEMMINI_SCALE(*(A + (i + 2) * stride_A + k), A_scale_factor) *
+                GEMMINI_SCALE(*(B + k * stride_B + j), B_scale_factor);
+            result[2][1] +=
+                GEMMINI_SCALE(*(A + (i + 2) * stride_A + k), A_scale_factor) *
+                GEMMINI_SCALE(*(B + k * stride_B + j + 1), B_scale_factor);
+            result[2][2] +=
+                GEMMINI_SCALE(*(A + (i + 2) * stride_A + k), A_scale_factor) *
+                GEMMINI_SCALE(*(B + k * stride_B + j + 2), B_scale_factor);
+            result[2][3] +=
+                GEMMINI_SCALE(*(A + (i + 2) * stride_A + k), A_scale_factor) *
+                GEMMINI_SCALE(*(B + k * stride_B + j + 3), B_scale_factor);
+            result[3][0] +=
+                GEMMINI_SCALE(*(A + (i + 3) * stride_A + k), A_scale_factor) *
+                GEMMINI_SCALE(*(B + k * stride_B + j), B_scale_factor);
+            result[3][1] +=
+                GEMMINI_SCALE(*(A + (i + 3) * stride_A + k), A_scale_factor) *
+                GEMMINI_SCALE(*(B + k * stride_B + j + 1), B_scale_factor);
+            result[3][2] +=
+                GEMMINI_SCALE(*(A + (i + 3) * stride_A + k), A_scale_factor) *
+                GEMMINI_SCALE(*(B + k * stride_B + j + 2), B_scale_factor);
+            result[3][3] +=
+                GEMMINI_SCALE(*(A + (i + 3) * stride_A + k), A_scale_factor) *
+                GEMMINI_SCALE(*(B + k * stride_B + j + 3), B_scale_factor);
+          }
+
+          for (size_t ii = 0; ii < 4; ++ii)
+            for (size_t jj = 0; jj < 4; ++jj)
+            {
+              const size_t idx = (i + ii) * stride_C + (j + jj);
+              C_acc[idx] = result[ii][jj];
+            }
+        }
+      }
+    }
+    else
+    {
+      size_t A_dim_strides[2] = {!transA ? stride_A : 1, !transA ? 1 : stride_A};
+      size_t B_dim_strides[2] = {!transB ? 1 : stride_B, !transB ? stride_B : 1};
+
+      static acc_t c_buffer[1024];
+      const size_t c_buffer_sz = sizeof(c_buffer) / sizeof(c_buffer[0]);
+      if ((act == LAYERNORM || act == SOFTMAX) && DIM_J > c_buffer_sz)
+      {
+        printf("Matmul is too large to normalize\n");
+        exit(1);
+      }
+
+      for (size_t i = 0; i < DIM_I; i++)
+      {
+        for (size_t j = 0; j < DIM_J; j++)
+        {
+          const size_t idx = (i * stride_C) + j;
+
+          const size_t bias_row = repeating_bias ? 0 : i;
+          acc_t sum = no_bias ? 0 : GEMMINI_ACC_SCALE(*(D + bias_row * stride_D + j), D_scale_factor);
+
+          for (size_t k = 0; k < DIM_K; k++)
+          {
+            const elem_t *a = A + i * A_dim_strides[0] + k * A_dim_strides[1];
+            const elem_t *b = B + j * B_dim_strides[0] + k * B_dim_strides[1];
+            sum += (GEMMINI_SCALE(*a, A_scale_factor) * GEMMINI_SCALE(*b, B_scale_factor));
+          }
+
+          C_acc[idx] = sum;
+        }
+      }
+    }
+  }
+}
+
 #undef GEMMINI_SCALE
 
 // General matmul which can be run with different dataflows, or on the CPU
@@ -1228,6 +1371,141 @@ static void tiled_matmul(size_t dim_I, size_t dim_J, size_t dim_K,
   }
 }
 
+namespace aisa
+{
+  static void tiled_matmul_int32(size_t dim_I, size_t dim_J, size_t dim_K,
+                                 const elem_t *A, const elem_t *B,
+                                 const void *D, void *C,
+                                 size_t stride_A, size_t stride_B, size_t stride_D, size_t stride_C,
+                                 scale_t A_scale_factor, scale_t B_scale_factor, scale_acc_t D_scale_factor,
+                                 int act, acc_scale_t scale, acc_scale_t bert_scale,
+                                 bool repeating_bias,
+                                 size_t tile_I, size_t tile_J, size_t tile_K,
+                                 bool transpose_A, bool transpose_B,
+                                 bool full_C, bool low_D,
+                                 uint8_t weightA,
+                                 enum tiled_matmul_type_t tiled_matmul_type)
+  {
+
+#ifdef GEMMINI_ASSERTIONS
+    if (tile_I <= 0)
+    {
+      printf("tile_I is non-positive\n");
+      exit(1);
+    }
+    else if (tile_J <= 0)
+    {
+      printf("tile_J is non-positive\n");
+      exit(1);
+    }
+    else if (tile_K <= 0)
+    {
+      printf("tile_K is non-positive\n");
+      exit(1);
+    }
+
+    const size_t dim_I_padded = (dim_I / DIM + (dim_I % DIM != 0)) * DIM;
+    const size_t dim_J_padded = (dim_J / DIM + (dim_J % DIM != 0)) * DIM;
+    const size_t dim_K_padded = (dim_K / DIM + (dim_K % DIM != 0)) * DIM;
+
+    if (tile_I * DIM > dim_I_padded)
+    {
+      printf("tile_I is too large (tile_I * DIM > dim_I_padded)\n");
+      exit(1);
+    }
+    else if (tile_J * DIM > dim_J_padded)
+    {
+      printf("tile_J is too large (tile_J * DIM > dim_J_padded)\n");
+      exit(1);
+    }
+    else if (tile_K * DIM > dim_K_padded)
+    {
+      printf("tile_K is too large (tile_K * DIM > dim_K_padded)\n");
+      exit(1);
+    }
+
+    const bool double_buffered = tiled_matmul_type == WS;
+
+    const size_t total_spad_size = double_buffered ? BANK_NUM * BANK_ROWS / 2 : BANK_NUM * BANK_ROWS;
+    const size_t total_acc_size = double_buffered ? ACC_ROWS / 2 : ACC_ROWS;
+
+    const size_t total_spad_rows =
+        (tile_I * tile_K * DIM) +
+        (tile_K * tile_J * DIM);
+
+    if (total_spad_rows > total_spad_size)
+    {
+      printf("Not enough space in scratchpad to store A and B matrices\n");
+      exit(1);
+    }
+
+    const size_t total_acc_rows =
+        tile_I * tile_J * DIM;
+
+    if (total_acc_rows > total_acc_size)
+    {
+      printf("Not enough space in accumulator to store C\n");
+      exit(1);
+    }
+
+    if (tile_I > 65535 || tile_J > 65535 || tile_K > 65535)
+    {
+      printf("I, J, and K tiling factors must be less than 65535, to fit within the bounds of the LOOP_WS function");
+      exit(1);
+    }
+
+    char matmul_type_str[][4] = {"OS", "WS", "CPU"};
+
+    if (((tiled_matmul_type == OS) && (transpose_A || transpose_B)) ||
+        (tiled_matmul_type == WS && transpose_A && transpose_B))
+    {
+      printf("Not implemented: %s matmul, a_transpose=%d, b_transpose=%d\n", matmul_type_str[tiled_matmul_type], transpose_A, transpose_B);
+      exit(1);
+    }
+
+    if ((tiled_matmul_type == CPU && (full_C || low_D)) ||
+        (tiled_matmul_type == OS && low_D))
+    {
+      printf("Not implemented: %s matmul, full_C=%d, low_D=%d\n", matmul_type_str[tiled_matmul_type], full_C, low_D);
+    }
+
+    if (act == LAYERNORM || act == SOFTMAX)
+    {
+      if (tiled_matmul_type == OS)
+      {
+        printf("Not implemented: %s matmul, act=%d\n", matmul_type_str[tiled_matmul_type], act);
+      }
+      if (tile_J * DIM < dim_J)
+      {
+        printf("When doing layernorm or softmax, the full J dimension of the matrix must fit in the accumulator\n");
+      }
+    }
+#endif
+
+    if (tiled_matmul_type == OS || tiled_matmul_type == WS)
+    {
+      tiled_matmul_outer(dim_I, dim_J, dim_K,
+                         A, B, D, C,
+                         stride_A, stride_B, stride_D, stride_C,
+                         A_scale_factor, B_scale_factor, D_scale_factor,
+                         tile_I, tile_J, tile_K,
+                         act, scale, bert_scale, repeating_bias,
+                         transpose_A, transpose_B,
+                         full_C, low_D,
+                         weightA,
+                         (int)tiled_matmul_type);
+    }
+    else
+    {
+      matmul_cpu_int32(transpose_A, transpose_B, dim_I, dim_J, dim_K,
+                       A, B, (const acc_t *)D, C,
+                       stride_A, stride_B, stride_D, stride_C,
+                       A_scale_factor, B_scale_factor, D_scale_factor,
+                       act, scale, bert_scale, repeating_bias,
+                       full_C);
+    }
+  }
+}
 
 static size_t tiled_matmul_total_spad_rows(size_t I, size_t J, size_t K) {
   return (I * K + K * J) * DIM;
@@ -1240,7 +1518,7 @@ static size_t tiled_matmul_total_acc_rows(size_t I, size_t J) {
 
 namespace aisa
 {
-  static void tiled_matmul_auto_fp(struct ggml_gemmini_args_t *args)
+  static void tiled_matmul_auto_fp32(struct ggml_gemmini_args_t *args)
   {
     printf("tiled_matmul_auto_fp called\n");
     // tile size와 block size 매칭을 통해, tiled별 연산 결과를 dequantize해서 llama.cpp의 output으로 전달
@@ -1354,23 +1632,11 @@ namespace aisa
 
     const bool cpu_fallback = tiled_matmul_type == CPU;
 
-    // Gemmini 경로(full_C=true)에서는 int32(acc_t) 누산 버퍼를 사용하고,
-    // CPU 폴백에서는 matmul_cpu가 int8(elem_t)로 결과를 내보내므로 별도 버퍼로 분리한다.
+    // Gemmini 경로(full_C=true)와 CPU 폴백 모두 int32(acc_t) 누산 버퍼를 사용한다.
     static thread_local std::vector<acc_t> c_acc32;
-    static thread_local std::vector<elem_t> c_acc8;
-    acc_t *acc_ptr32 = nullptr;
-    elem_t *acc_ptr8 = nullptr;
-    void *acc_ptr = nullptr;
-
-    if (cpu_fallback) {
-      c_acc8.resize(dim_I * dim_J);
-      acc_ptr8 = c_acc8.data();
-      acc_ptr = static_cast<void *>(acc_ptr8);
-    } else {
-      c_acc32.resize(dim_I * dim_J);
-      acc_ptr32 = c_acc32.data();
-      acc_ptr = static_cast<void *>(acc_ptr32);
-    }
+    c_acc32.resize(dim_I * dim_J);
+    acc_t *acc_ptr32 = c_acc32.data();
+    void *acc_ptr = static_cast<void *>(acc_ptr32);
 
     // 블록별로 float 결과를 누적할 때 편하게 더해 줄 수 있도록 fp32 출력 버퍼를 미리 0으로 클리어
     float *f_out = args->f_out;
@@ -1400,11 +1666,7 @@ namespace aisa
       const size_t block_tile_K = std::max<size_t>(1, std::min(tile_K, block_tiles)); // auto tiler가 제안한 tile_K와 현재 블록에 필요한 타일 수 중 작은 값 (최소 1)
 
       // 이전 블록에서 남아있는 잔여 값을 제거하고 fresh accumulation을 수행.
-      if (cpu_fallback) {
-        std::fill(c_acc8.begin(), c_acc8.end(), static_cast<elem_t>(0));
-      } else {
-        std::fill(c_acc32.begin(), c_acc32.end(), 0);
-      }
+      std::fill(c_acc32.begin(), c_acc32.end(), 0);
 
       // A,B는 row-major 형태이므로 현재 K 블록만큼 쉬프트한 포인터를 넘김
       // bias(D)는 첫 반복에서만 전달해 중복 더하기를 회피
@@ -1413,7 +1675,19 @@ namespace aisa
       const void *D_block = first_block ? args->D : nullptr;
 
       // auto tiling으로 선정된 K 타일을 block에 매칭하여 block_tile_K를 사용해 호출
-      tiled_matmul(dim_I, dim_J, block_K,
+      if (cpu_fallback) {
+        tiled_matmul_int32(dim_I, dim_J, block_K,
+                   A_block, B_block, D_block, acc_ptr,
+                   args->sA, args->sB, args->sD, dim_J,
+                   args->scale_A, args->scale_B, args->scale_D,
+                   act, args->scale, args->bert_scale, args->repeating_bias,
+                   tile_I, tile_J, block_tile_K,
+                   args->transpose_A, args->transpose_B,
+                   true, args->low_D,
+                   args->weightA,
+                   tiled_matmul_type);
+      } else {
+        tiled_matmul(dim_I, dim_J, block_K,
                    A_block, B_block, D_block, acc_ptr,
                    args->sA, args->sB, args->sD, dim_J,
                    args->scale_A, args->scale_B, args->scale_D,
@@ -1423,14 +1697,14 @@ namespace aisa
                    args->full_C, args->low_D,
                    args->weightA,
                    tiled_matmul_type);
+      }
 
       // Gemmini의 int32(acc_t) 결과를 float로 dequantize
       if (f_out != nullptr)
       {
         for (size_t i = 0; i < dim_I; ++i)
         {
-          const acc_t *row_acc32 = cpu_fallback ? nullptr : acc_ptr32 + i * dim_J;
-          const elem_t *row_acc8 = cpu_fallback ? acc_ptr8 + i * dim_J : nullptr;
+          const acc_t *row_acc32 = acc_ptr32 + i * dim_J;
           float *row_out = f_out + i * stride_f_out;
           for (size_t j = 0; j < dim_J; ++j)
           {
@@ -1442,10 +1716,7 @@ namespace aisa
                 scale_w = args->B_scales[scale_idx];
             }
             float scale_out = args->scale_A * scale_w;
-            const float acc_val = cpu_fallback ?
-                static_cast<float>(row_acc8[j]) :
-                static_cast<float>(row_acc32[j]);
-            row_out[j] += acc_val * scale_out;
+            row_out[j] += static_cast<float>(row_acc32[j]) * scale_out;
           }
         }
       }
