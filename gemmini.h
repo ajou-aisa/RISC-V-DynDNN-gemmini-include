@@ -1676,12 +1676,13 @@ namespace aisa
       // bias(D)는 첫 반복에서만 전달해 중복 더하기를 회피
       const elem_t *A_block = args->A + k_offset;
       const elem_t *B_block = args->B + k_offset;
+      const elem_t *B_block_cpu = args->transpose_B ? (args->B + k_offset) : (args->B + k_offset * args->sB);
       const void *D_block = first_block ? args->D : nullptr;
 
       // auto tiling으로 선정된 K 타일을 block에 매칭하여 block_tile_K를 사용해 호출
       if (cpu_fallback) {
         tiled_matmul_int32(dim_I, dim_J, block_K,
-                   A_block, B_block, D_block, acc_ptr,
+                   A_block, B_block_cpu, D_block, acc_ptr,
                    args->sA, args->sB, args->sD, dim_J,
                    args->scale_A, args->scale_B, args->scale_D,
                    act, args->scale, args->bert_scale, args->repeating_bias,
