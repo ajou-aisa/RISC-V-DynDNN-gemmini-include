@@ -1352,11 +1352,25 @@ namespace aisa
     printf("[layer=%s][tiled_matmul_auto_fp] dim=(%zu,%zu,%zu) tiles=(%zu,%zu,%zu)\n",
            layer_name, dim_I, dim_J, dim_K, tile_I, tile_J, tile_K);
 
-    // Gemmini가 항상 int32 누산기(acc)에서 결과를 내보내므로, 블록별 결과를 잠시 저장할 버퍼
-    // thread_local로 두어 호출마다 반복 alloc/free를 피함
+    const bool cpu_fallback = tiled_matmul_type == CPU;
+
+    // Gemmini 경로(full_C=true)에서는 int32(acc_t) 누산 버퍼를 사용하고,
+    // CPU 폴백에서는 matmul_cpu가 int8(elem_t)로 결과를 내보내므로 별도 버퍼로 분리한다.
     static thread_local std::vector<acc_t> c_acc32;
-    c_acc32.resize(dim_I * dim_J);
-    acc_t *acc_ptr = c_acc32.data();
+    static thread_local std::vector<elem_t> c_acc8;
+    acc_t *acc_ptr32 = nullptr;
+    elem_t *acc_ptr8 = nullptr;
+    void *acc_ptr = nullptr;
+
+    if (cpu_fallback) {
+      c_acc8.resize(dim_I * dim_J);
+      acc_ptr8 = c_acc8.data();
+      acc_ptr = static_cast<void *>(acc_ptr8);
+    } else {
+      c_acc32.resize(dim_I * dim_J);
+      acc_ptr32 = c_acc32.data();
+      acc_ptr = static_cast<void *>(acc_ptr32);
+    }
 
     // 블록별로 float 결과를 누적할 때 편하게 더해 줄 수 있도록 fp32 출력 버퍼를 미리 0으로 클리어
     float *f_out = args->f_out;
@@ -1386,7 +1400,11 @@ namespace aisa
       const size_t block_tile_K = std::max<size_t>(1, std::min(tile_K, block_tiles)); // auto tiler가 제안한 tile_K와 현재 블록에 필요한 타일 수 중 작은 값 (최소 1)
 
       // 이전 블록에서 남아있는 잔여 값을 제거하고 fresh accumulation을 수행.
-      std::fill(c_acc32.begin(), c_acc32.end(), 0);
+      if (cpu_fallback) {
+        std::fill(c_acc8.begin(), c_acc8.end(), static_cast<elem_t>(0));
+      } else {
+        std::fill(c_acc32.begin(), c_acc32.end(), 0);
+      }
 
       // A,B는 row-major 형태이므로 현재 K 블록만큼 쉬프트한 포인터를 넘김
       // bias(D)는 첫 반복에서만 전달해 중복 더하기를 회피
@@ -1402,7 +1420,7 @@ namespace aisa
                    act, args->scale, args->bert_scale, args->repeating_bias,
                    tile_I, tile_J, block_tile_K,
                    args->transpose_A, args->transpose_B,
-                   true, args->low_D,
+                   cpu_fallback ? true : args->full_C, args->low_D,
                    args->weightA,
                    tiled_matmul_type);
 
@@ -1411,7 +1429,8 @@ namespace aisa
       {
         for (size_t i = 0; i < dim_I; ++i)
         {
-          const acc_t *row_acc = acc_ptr + i * dim_J;
+          const acc_t *row_acc32 = cpu_fallback ? nullptr : acc_ptr32 + i * dim_J;
+          const elem_t *row_acc8 = cpu_fallback ? acc_ptr8 + i * dim_J : nullptr;
           float *row_out = f_out + i * stride_f_out;
           for (size_t j = 0; j < dim_J; ++j)
           {
@@ -1423,7 +1442,10 @@ namespace aisa
                 scale_w = args->B_scales[scale_idx];
             }
             float scale_out = args->scale_A * scale_w;
-            row_out[j] += static_cast<float>(row_acc[j]) * scale_out;
+            const float acc_val = cpu_fallback ?
+                static_cast<float>(row_acc8[j]) :
+                static_cast<float>(row_acc32[j]);
+            row_out[j] += acc_val * scale_out;
           }
         }
       }
