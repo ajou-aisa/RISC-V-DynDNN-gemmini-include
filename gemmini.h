@@ -1463,10 +1463,10 @@ namespace aisa
       exit(1);
     }
 
-    if ((tiled_matmul_type == CPU && (full_C || low_D)) ||
+    if ((tiled_matmul_type == CPU && low_D) ||
         (tiled_matmul_type == OS && low_D))
     {
-      printf("Not implemented: %s matmul, full_C=%d, low_D=%d\n", matmul_type_str[tiled_matmul_type], full_C, low_D);
+      printf("Not implemented: %s matmul, low_D=%d\n", matmul_type_str[tiled_matmul_type], low_D);
     }
 
     if (act == LAYERNORM || act == SOFTMAX)
