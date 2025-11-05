@@ -1420,7 +1420,7 @@ namespace aisa
                    act, args->scale, args->bert_scale, args->repeating_bias,
                    tile_I, tile_J, block_tile_K,
                    args->transpose_A, args->transpose_B,
-                   cpu_fallback ? true : args->full_C, args->low_D,
+                   args->full_C, args->low_D,
                    args->weightA,
                    tiled_matmul_type);
 
