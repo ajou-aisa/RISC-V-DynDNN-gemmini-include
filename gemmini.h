@@ -1244,17 +1244,16 @@ namespace aisa
   {
     printf("tiled_matmul_auto_fp called\n");
     // tile size와 block size 매칭을 통해, tiled별 연산 결과를 dequantize해서 llama.cpp의 output으로 전달
-    if (args == NULL) {
+    if (args == NULL)
       return;
-    }
-    
+
     const size_t dim_I = args->I;
     const size_t dim_J = args->J;
     const size_t dim_K = args->K;
-    
+
     const enum tiled_matmul_type_t tiled_matmul_type = args->tiled_matmul_type;
     const int act = args->act;
-    
+
     // gemmini 기본 auto tiling
 #define partition_rows (BANK_NUM * BANK_ROWS / 2)
 #define mats_in_partition (partition_rows / DIM)
@@ -1362,8 +1361,8 @@ namespace aisa
     // 블록별로 float 결과를 누적할 때 편하게 더해 줄 수 있도록 fp32 출력 버퍼를 미리 0으로 클리어
     float *f_out = args->f_out;
     const size_t stride_f_out = args->stride_f_out;
-    if (f_out != nullptr) 
-      for (size_t i = 0; i < dim_I; ++i) 
+    if (f_out != nullptr)
+      for (size_t i = 0; i < dim_I; ++i)
         std::fill(f_out + i * stride_f_out, f_out + i * stride_f_out + dim_J, 0.0f);
 
     // Gemmini가 한 번에 소화할 수 있는 K 타일 수(max_block_elems)와 Q8_0 블록 크기(block_granularity)를 결합해 실제 한 반복에서 처리할 K 크기를 결정
@@ -1379,10 +1378,11 @@ namespace aisa
     size_t block_idx = 0;
     bool first_block = true;
 
-    while (k_offset < dim_K) {
-      const size_t remaining_k = dim_K - k_offset; // 아직 처리되지 않은 K 길이
-      const size_t block_K = std::min(chunk_elems, remaining_k); // 이번 반복에서 실제로 계산에 사용할 K 요소 개수
-      const size_t block_tiles = (block_K + DIM - 1) / DIM; // block_K를 DIM 크기 타일로 나눴을 때 필요한 타일 수
+    while (k_offset < dim_K)
+    {
+      const size_t remaining_k = dim_K - k_offset;                                    // 아직 처리되지 않은 K 길이
+      const size_t block_K = std::min(chunk_elems, remaining_k);                      // 이번 반복에서 실제로 계산에 사용할 K 요소 개수
+      const size_t block_tiles = (block_K + DIM - 1) / DIM;                           // block_K를 DIM 크기 타일로 나눴을 때 필요한 타일 수
       const size_t block_tile_K = std::max<size_t>(1, std::min(tile_K, block_tiles)); // auto tiler가 제안한 tile_K와 현재 블록에 필요한 타일 수 중 작은 값 (최소 1)
 
       // 이전 블록에서 남아있는 잔여 값을 제거하고 fresh accumulation을 수행.
@@ -1407,18 +1407,22 @@ namespace aisa
                    tiled_matmul_type);
 
       // Gemmini의 int32(acc_t) 결과를 float로 dequantize
-      if (f_out != nullptr) {
-        for (size_t i = 0; i < dim_I; ++i) {
+      if (f_out != nullptr)
+      {
+        for (size_t i = 0; i < dim_I; ++i)
+        {
           const acc_t *row_acc = acc_ptr + i * dim_J;
           float *row_out = f_out + i * stride_f_out;
-          for (size_t j = 0; j < dim_J; ++j) {
+          for (size_t j = 0; j < dim_J; ++j)
+          {
             float scale_w = 1.0f;
-            if (args->B_scales && block_idx < args->blocks_K) {
+            if (args->B_scales && block_idx < args->blocks_K)
+            {
               const size_t scale_idx = block_idx * args->blocks_J + j;
-              if (scale_idx < total_scale_elems) 
+              if (scale_idx < total_scale_elems)
                 scale_w = args->B_scales[scale_idx];
             }
-            float scale_out = args->scale_A*scale_w;
+            float scale_out = args->scale_A * scale_w;
             row_out[j] += static_cast<float>(row_acc[j]) * scale_out;
           }
         }
@@ -1453,7 +1457,6 @@ namespace aisa
 #undef mats_in_acc
 #undef max_tile_i_j
 #undef max_tile_k
-
   }
 }
 
