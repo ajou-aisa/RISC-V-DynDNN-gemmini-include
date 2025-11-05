@@ -1108,6 +1108,8 @@ static void matmul_cpu(bool transA, bool transB, size_t DIM_I, size_t DIM_J, siz
 
 namespace aisa
 {
+  static thread_local bool matmul_cpu_int32_header_logged = false;
+  static thread_local size_t matmul_cpu_int32_call_seq = 0;
   static void matmul_cpu_int32(bool transA, bool transB, size_t DIM_I, size_t DIM_J, size_t DIM_K,
                                const elem_t *A, const elem_t *B, const acc_t *D,
                                void *C,
@@ -1127,6 +1129,27 @@ namespace aisa
       return;
     }
 
+    const size_t call_seq = matmul_cpu_int32_call_seq++;
+    const bool debug_enabled = call_seq < 3;
+
+    if (!matmul_cpu_int32_header_logged && debug_enabled)
+    {
+      matmul_cpu_int32_header_logged = true;
+      printf("[matmul_cpu_int32] full_C debugging enabled (showing first 3 calls)\n");
+    }
+
+    if (debug_enabled)
+    {
+      printf("[matmul_cpu_int32][call=%zu] transA=%d transB=%d dims=(%zu,%zu,%zu) "
+             "strides(A=%zu,B=%zu,D=%zu,C=%zu) full_C=%d\n",
+             call_seq, transA, transB, DIM_I, DIM_J, DIM_K,
+             stride_A, stride_B, stride_D, stride_C, full_C);
+      printf("[matmul_cpu_int32][call=%zu] scales A=%.6f B=%.6f D=%.6f act=%d scale=%.6f "
+             "bert_scale=%.6f repeating_bias=%d\n",
+             call_seq, (double)A_scale_factor, (double)B_scale_factor, (double)D_scale_factor,
+             act, (double)scale, (double)bert_scale, repeating_bias);
+    }
+
     if (act != NO_ACTIVATION)
     {
       printf("[matmul_cpu_int32] Expected NO_ACTIVATION but got act=%d (full_C-only path)\n", act);
@@ -1138,6 +1161,10 @@ namespace aisa
 
     if (!transA && !transB && DIM_I % 4 == 0 && DIM_J % 4 == 0)
     {
+      if (debug_enabled)
+      {
+        printf("[matmul_cpu_int32][call=%zu] using 4x4 kernel path\n", call_seq);
+      }
       for (size_t i = 0; i < DIM_I; i += 4)
       {
         for (size_t j = 0; j < DIM_J; j += 4)
@@ -1152,8 +1179,23 @@ namespace aisa
               result[ii][jj] = no_bias ? 0 : GEMMINI_ACC_SCALE(*(D + bias_row * stride_D + j + jj), D_scale_factor);
             }
 
+          if (debug_enabled && i == 0 && j == 0)
+          {
+            printf("[matmul_cpu_int32][call=%zu] 4x4 bias row i..i+3, cols j..j+3 -> {%d,%d,%d,%d}\n",
+                   call_seq,
+                   (int)result[0][0], (int)result[0][1], (int)result[0][2], (int)result[0][3]);
+          }
+
           for (size_t k = 0; k < DIM_K; k++)
           {
+            if (debug_enabled && i == 0 && j == 0 && k < 4)
+            {
+              const elem_t a0 = *(A + i * stride_A + k);
+              const elem_t b0 = *(B + k * stride_B + j);
+              printf("[matmul_cpu_int32][call=%zu] 4x4 k=%zu A[0,%zu]=%d B[%zu,0]=%d\n",
+                     call_seq, k, k, (int)a0, k, (int)b0);
+            }
+
             result[0][0] +=
                 GEMMINI_SCALE(*(A + i * stride_A + k), A_scale_factor) *
                 GEMMINI_SCALE(*(B + k * stride_B + j), B_scale_factor);
@@ -1209,6 +1251,12 @@ namespace aisa
             {
               const size_t idx = (i + ii) * stride_C + (j + jj);
               C_acc[idx] = result[ii][jj];
+
+              if (debug_enabled && i + ii < 1 && j + jj < 4)
+              {
+                printf("[matmul_cpu_int32][call=%zu] 4x4 result row=%zu col=%zu acc=%d\n",
+                       call_seq, i + ii, j + jj, (int)result[ii][jj]);
+              }
             }
         }
       }
@@ -1217,6 +1265,13 @@ namespace aisa
     {
       size_t A_dim_strides[2] = {!transA ? stride_A : 1, !transA ? 1 : stride_A};
       size_t B_dim_strides[2] = {!transB ? 1 : stride_B, !transB ? stride_B : 1};
+
+      if (debug_enabled)
+      {
+        printf("[matmul_cpu_int32][call=%zu] general path A_dim_strides=(%zu,%zu) "
+               "B_dim_strides=(%zu,%zu)\n",
+               call_seq, A_dim_strides[0], A_dim_strides[1], B_dim_strides[0], B_dim_strides[1]);
+      }
 
       static acc_t c_buffer[1024];
       const size_t c_buffer_sz = sizeof(c_buffer) / sizeof(c_buffer[0]);
@@ -1234,15 +1289,42 @@ namespace aisa
 
           const size_t bias_row = repeating_bias ? 0 : i;
           acc_t sum = no_bias ? 0 : GEMMINI_ACC_SCALE(*(D + bias_row * stride_D + j), D_scale_factor);
+          const acc_t bias_term = sum;
+
+          if (debug_enabled && i < 1 && j < 4)
+          {
+            printf("[matmul_cpu_int32][call=%zu] bias row=%zu col=%zu value=%d\n",
+                   call_seq, i, j, (int)bias_term);
+          }
 
           for (size_t k = 0; k < DIM_K; k++)
           {
-            const elem_t *a = A + i * A_dim_strides[0] + k * A_dim_strides[1];
-            const elem_t *b = B + j * B_dim_strides[0] + k * B_dim_strides[1];
-            sum += (GEMMINI_SCALE(*a, A_scale_factor) * GEMMINI_SCALE(*b, B_scale_factor));
+            const size_t a_off = i * A_dim_strides[0] + k * A_dim_strides[1];
+            const size_t b_off = j * B_dim_strides[0] + k * B_dim_strides[1];
+            const elem_t a_raw = A[a_off];
+            const elem_t b_raw = B[b_off];
+            const acc_t a_scaled = GEMMINI_SCALE(a_raw, A_scale_factor);
+            const acc_t b_scaled = GEMMINI_SCALE(b_raw, B_scale_factor);
+            const acc_t prod = a_scaled * b_scaled;
+            sum += prod;
+
+            if (debug_enabled && i < 1 && j < 4 && k < 4)
+            {
+              printf("[matmul_cpu_int32][call=%zu] (i=%zu,j=%zu) k=%zu "
+                     "a_off=%zu b_off=%zu rawA=%d rawB=%d scaledA=%d scaledB=%d "
+                     "partial=%d\n",
+                     call_seq, i, j, k, a_off, b_off,
+                     (int)a_raw, (int)b_raw, (int)a_scaled, (int)b_scaled, (int)sum);
+            }
           }
 
           C_acc[idx] = sum;
+
+          if (debug_enabled && i < 1 && j < 4)
+          {
+            printf("[matmul_cpu_int32][call=%zu] result row=%zu col=%zu acc=%d\n",
+                   call_seq, i, j, (int)sum);
+          }
         }
       }
     }
@@ -1675,8 +1757,21 @@ namespace aisa
       // A,B는 row-major 형태이므로 현재 K 블록만큼 쉬프트한 포인터를 넘김
       // bias(D)는 첫 반복에서만 전달해 중복 더하기를 회피
       const elem_t *A_block = args->A + k_offset;
-      const elem_t *B_block = args->B + k_offset;
+      const elem_t *B_block_hw = args->B + k_offset;
       const elem_t *B_block_cpu = args->transpose_B ? (args->B + k_offset) : (args->B + k_offset * args->sB);
+      if (cpu_fallback && block_idx < 2)
+      {
+        printf("[layer=%s][cpu_fallback] block=%zu A_block=%p B_block_cpu=%p transpose_A=%d transpose_B=%d\n",
+               layer_name, block_idx, (const void *)A_block, (const void *)B_block_cpu,
+               args->transpose_A, args->transpose_B);
+        const size_t sample_k = std::min<size_t>(block_K, (size_t)4);
+        for (size_t kk = 0; kk < sample_k; ++kk)
+        {
+          const elem_t a_sample = *(A_block + kk);
+          const elem_t b_sample = *(B_block_cpu + kk * args->sB);
+          printf("  k=%zu A_row0[%zu]=%d B_row%zu_col0=%d\n", kk, kk, (int)a_sample, kk, (int)b_sample);
+        }
+      }
       const void *D_block = first_block ? args->D : nullptr;
 
       // auto tiling으로 선정된 K 타일을 block에 매칭하여 block_tile_K를 사용해 호출
@@ -1693,7 +1788,7 @@ namespace aisa
                    tiled_matmul_type);
       } else {
         tiled_matmul(dim_I, dim_J, block_K,
-                   A_block, B_block, D_block, acc_ptr,
+                   A_block, B_block_hw, D_block, acc_ptr,
                    args->sA, args->sB, args->sD, dim_J,
                    1.0f, 1.0f, args->scale_D,
                    act, args->scale, args->bert_scale, args->repeating_bias,
