@@ -1108,8 +1108,6 @@ static void matmul_cpu(bool transA, bool transB, size_t DIM_I, size_t DIM_J, siz
 
 namespace aisa
 {
-  static thread_local bool matmul_cpu_int32_header_logged = false;
-  static thread_local size_t matmul_cpu_int32_call_seq = 0;
   static void matmul_cpu_int32(bool transA, bool transB, size_t DIM_I, size_t DIM_J, size_t DIM_K,
                                const elem_t *A, const elem_t *B, const acc_t *D,
                                void *C,
@@ -1129,27 +1127,6 @@ namespace aisa
       return;
     }
 
-    const size_t call_seq = matmul_cpu_int32_call_seq++;
-    const bool debug_enabled = true;
-
-    if (!matmul_cpu_int32_header_logged && debug_enabled)
-    {
-      matmul_cpu_int32_header_logged = true;
-      printf("[matmul_cpu_int32] full_C debugging enabled (logging every call)\n");
-    }
-
-    if (debug_enabled)
-    {
-      printf("[matmul_cpu_int32][call=%zu] transA=%d transB=%d dims=(%zu,%zu,%zu) "
-             "strides(A=%zu,B=%zu,D=%zu,C=%zu) full_C=%d\n",
-             call_seq, transA, transB, DIM_I, DIM_J, DIM_K,
-             stride_A, stride_B, stride_D, stride_C, full_C);
-      printf("[matmul_cpu_int32][call=%zu] scales A=%.6f B=%.6f D=%.6f act=%d scale=%.6f "
-             "bert_scale=%.6f repeating_bias=%d\n",
-             call_seq, (double)A_scale_factor, (double)B_scale_factor, (double)D_scale_factor,
-             act, (double)scale, (double)bert_scale, repeating_bias);
-    }
-
     if (act != NO_ACTIVATION)
     {
       printf("[matmul_cpu_int32] Expected NO_ACTIVATION but got act=%d (full_C-only path)\n", act);
@@ -1161,15 +1138,10 @@ namespace aisa
 
     if (!transA && !transB && DIM_I % 4 == 0 && DIM_J % 4 == 0)
     {
-      if (debug_enabled)
-      {
-        printf("[matmul_cpu_int32][call=%zu] using 4x4 kernel path\n", call_seq);
-      }
       for (size_t i = 0; i < DIM_I; i += 4)
       {
         for (size_t j = 0; j < DIM_J; j += 4)
         {
-
           acc_t result[4][4];
 
           for (size_t ii = 0; ii < 4; ii++)
@@ -1179,23 +1151,8 @@ namespace aisa
               result[ii][jj] = no_bias ? 0 : GEMMINI_ACC_SCALE(*(D + bias_row * stride_D + j + jj), D_scale_factor);
             }
 
-          if (debug_enabled && i == 0 && j == 0)
-          {
-            printf("[matmul_cpu_int32][call=%zu] 4x4 bias row i..i+3, cols j..j+3 -> {%d,%d,%d,%d}\n",
-                   call_seq,
-                   (int)result[0][0], (int)result[0][1], (int)result[0][2], (int)result[0][3]);
-          }
-
           for (size_t k = 0; k < DIM_K; k++)
           {
-            if (debug_enabled && i == 0 && j == 0 && k < 4)
-            {
-              const elem_t a0 = *(A + i * stride_A + k);
-              const elem_t b0 = *(B + k * stride_B + j);
-              printf("[matmul_cpu_int32][call=%zu] 4x4 k=%zu A[0,%zu]=%d B[%zu,0]=%d\n",
-                     call_seq, k, k, (int)a0, k, (int)b0);
-            }
-
             result[0][0] +=
                 GEMMINI_SCALE(*(A + i * stride_A + k), A_scale_factor) *
                 GEMMINI_SCALE(*(B + k * stride_B + j), B_scale_factor);
@@ -1251,12 +1208,6 @@ namespace aisa
             {
               const size_t idx = (i + ii) * stride_C + (j + jj);
               C_acc[idx] = result[ii][jj];
-
-              if (debug_enabled && i + ii < 1 && j + jj < 4)
-              {
-                printf("[matmul_cpu_int32][call=%zu] 4x4 result row=%zu col=%zu acc=%d\n",
-                       call_seq, i + ii, j + jj, (int)result[ii][jj]);
-              }
             }
         }
       }
@@ -1265,13 +1216,6 @@ namespace aisa
     {
       size_t A_dim_strides[2] = {!transA ? stride_A : 1, !transA ? 1 : stride_A};
       size_t B_dim_strides[2] = {!transB ? 1 : stride_B, !transB ? stride_B : 1};
-
-      if (debug_enabled)
-      {
-        printf("[matmul_cpu_int32][call=%zu] general path A_dim_strides=(%zu,%zu) "
-               "B_dim_strides=(%zu,%zu)\n",
-               call_seq, A_dim_strides[0], A_dim_strides[1], B_dim_strides[0], B_dim_strides[1]);
-      }
 
       static acc_t c_buffer[1024];
       const size_t c_buffer_sz = sizeof(c_buffer) / sizeof(c_buffer[0]);
@@ -1291,12 +1235,6 @@ namespace aisa
           acc_t sum = no_bias ? 0 : GEMMINI_ACC_SCALE(*(D + bias_row * stride_D + j), D_scale_factor);
           const acc_t bias_term = sum;
 
-          if (debug_enabled && i < 1 && j < 4)
-          {
-            printf("[matmul_cpu_int32][call=%zu] bias row=%zu col=%zu value=%d\n",
-                   call_seq, i, j, (int)bias_term);
-          }
-
           for (size_t k = 0; k < DIM_K; k++)
           {
             const size_t a_off = i * A_dim_strides[0] + k * A_dim_strides[1];
@@ -1307,24 +1245,9 @@ namespace aisa
             const acc_t b_scaled = GEMMINI_SCALE(b_raw, B_scale_factor);
             const acc_t prod = a_scaled * b_scaled;
             sum += prod;
-
-            if (debug_enabled && i < 1 && j < 4 && k < 4)
-            {
-              printf("[matmul_cpu_int32][call=%zu] (i=%zu,j=%zu) k=%zu "
-                     "a_off=%zu b_off=%zu rawA=%d rawB=%d scaledA=%d scaledB=%d "
-                     "partial=%d\n",
-                     call_seq, i, j, k, a_off, b_off,
-                     (int)a_raw, (int)b_raw, (int)a_scaled, (int)b_scaled, (int)sum);
-            }
           }
 
           C_acc[idx] = sum;
-
-          if (debug_enabled && i < 1 && j < 4)
-          {
-            printf("[matmul_cpu_int32][call=%zu] result row=%zu col=%zu acc=%d\n",
-                   call_seq, i, j, (int)sum);
-          }
         }
       }
     }
@@ -1602,7 +1525,6 @@ namespace aisa
 {
   static void tiled_matmul_auto_fp32(struct ggml_gemmini_args_t *args)
   {
-    printf("tiled_matmul_auto_fp called\n");
     // tile size와 block size 매칭을 통해, tiled별 연산 결과를 dequantize해서 llama.cpp의 output으로 전달
     if (args == NULL)
       return;
@@ -1708,13 +1630,11 @@ namespace aisa
 
     // tile size 디버깅
     const char *layer_name = args->layer_name ? args->layer_name : "";
-    printf("[layer=%s][tiled_matmul_auto_fp] dim=(%zu,%zu,%zu) tiles=(%zu,%zu,%zu)\n",
+    printf("[layer=%s][tiled_matmul_auto_fp32] dim=(%zu,%zu,%zu) tiles=(%zu,%zu,%zu)\n",
            layer_name, dim_I, dim_J, dim_K, tile_I, tile_J, tile_K);
 
     const bool cpu_fallback = tiled_matmul_type == CPU;
 
-    printf("[layer=%s][cpu_fallback] full_C=%d option=%d\n", layer_name, args->full_C, tiled_matmul_type);
-    
     // Gemmini 경로(full_C=true)와 CPU 폴백 모두 int32(acc_t) 누산 버퍼를 사용한다.
     static thread_local std::vector<acc_t> c_acc32;
     c_acc32.resize(dim_I * dim_J);
@@ -1751,65 +1671,67 @@ namespace aisa
       // 이전 블록에서 남아있는 잔여 값을 제거하고 fresh accumulation을 수행.
       std::fill(c_acc32.begin(), c_acc32.end(), 0);
 
-      if (cpu_fallback) {
-        printf("[layer=%s][cpu_fallback] block_idx=%zu k_offset=%zu block_K=%zu tile_K=%zu sA=%zu sB=%zu\n",
-               layer_name, block_idx, k_offset, block_K, block_tile_K, args->sA, args->sB);
-      }
-
       // A,B는 row-major 형태이므로 현재 K 블록만큼 쉬프트한 포인터를 넘김
       // bias(D)는 첫 반복에서만 전달해 중복 더하기를 회피
       const elem_t *A_block = args->A + k_offset;
       const elem_t *B_block_hw = args->B + k_offset;
       const elem_t *B_block_cpu = args->transpose_B ? (args->B + k_offset) : (args->B + k_offset * args->sB);
-      if (cpu_fallback && block_idx < 2)
-      {
-        printf("[layer=%s][cpu_fallback] block=%zu A_block=%p B_block_cpu=%p transpose_A=%d transpose_B=%d\n",
-               layer_name, block_idx, (const void *)A_block, (const void *)B_block_cpu,
-               args->transpose_A, args->transpose_B);
-        const size_t sample_k = std::min<size_t>(block_K, (size_t)4);
-        for (size_t kk = 0; kk < sample_k; ++kk)
-        {
-          const elem_t a_sample = *(A_block + kk);
-          const elem_t b_sample = *(B_block_cpu + kk * args->sB);
-          printf("  k=%zu A_row0[%zu]=%d B_row%zu_col0=%d\n", kk, kk, (int)a_sample, kk, (int)b_sample);
-        }
-      }
+
       const void *D_block = first_block ? args->D : nullptr;
 
       // auto tiling으로 선정된 K 타일을 block에 매칭하여 block_tile_K를 사용해 호출
-      if (cpu_fallback) {
+      if (cpu_fallback)
+      {
         tiled_matmul_int32(dim_I, dim_J, block_K,
-                   A_block, B_block_cpu, D_block, acc_ptr,
-                   args->sA, args->sB, args->sD, dim_J,
-                   1.0f, 1.0f, args->scale_D,
-                   act, args->scale, args->bert_scale, args->repeating_bias,
-                   tile_I, tile_J, block_tile_K,
-                   args->transpose_A, args->transpose_B,
-                   true, args->low_D,
-                   args->weightA,
-                   tiled_matmul_type);
-      } else {
+                           A_block, B_block_cpu, D_block, acc_ptr,
+                           args->sA, args->sB, args->sD, dim_J,
+                           1.0f, 1.0f, args->scale_D,
+                           act, args->scale, args->bert_scale, args->repeating_bias,
+                           tile_I, tile_J, block_tile_K,
+                           args->transpose_A, args->transpose_B,
+                           true, args->low_D,
+                           args->weightA,
+                           tiled_matmul_type);
+      }
+      else
+      {
         tiled_matmul(dim_I, dim_J, block_K,
-                   A_block, B_block_hw, D_block, acc_ptr,
-                   args->sA, args->sB, args->sD, dim_J,
-                   1.0f, 1.0f, args->scale_D,
-                   act, args->scale, args->bert_scale, args->repeating_bias,
-                   tile_I, tile_J, block_tile_K,
-                   args->transpose_A, args->transpose_B,
-                   args->full_C, args->low_D,
-                   args->weightA,
-                   tiled_matmul_type);
+                     A_block, B_block_hw, D_block, acc_ptr,
+                     args->sA, args->sB, args->sD, dim_J,
+                     1.0f, 1.0f, args->scale_D,
+                     act, args->scale, args->bert_scale, args->repeating_bias,
+                     tile_I, tile_J, block_tile_K,
+                     args->transpose_A, args->transpose_B,
+                     args->full_C, args->low_D,
+                     args->weightA,
+                     tiled_matmul_type);
       }
 
       // Gemmini의 int32(acc_t) 결과를 float로 dequantize
       if (f_out != nullptr)
       {
+        const size_t k_off = k_offset; // 이번 블록의 K 시작 오프셋
+        const bool used_bias = (D_block != nullptr);
+        GGML_ASSERT(act == NO_ACTIVATION);
+
+        double diff_abs_sum = 0.0, diff_sq_sum = 0.0, diff_max = 0.0;
+        size_t bad_cnt = 0;
+        const double tol = 1e-7;
+
+        const elem_t *A_base = args->A + k_off;
+        const elem_t *B_base = args->transpose_B ? (args->B + k_off) : (args->B + k_off * args->sB);
+
+        printf("[layer=%s][deq.block] block=%zu k_off=%zu K=%zu scale_A=%.6f act=%d bias=%d D_scale=%.6f\n",
+               layer_name, block_idx, k_off, block_K, args->scale_A, act, (int)used_bias, (double)args->scale_D);
+
         for (size_t i = 0; i < dim_I; ++i)
         {
           const acc_t *row_acc32 = acc_ptr32 + i * dim_J;
           float *row_out = f_out + i * stride_f_out;
+
           for (size_t j = 0; j < dim_J; ++j)
           {
+            // per-block weight scale 조회
             float scale_w = 1.0f;
             size_t scale_idx = 0;
             if (args->B_scales && block_idx < args->blocks_K)
@@ -1817,30 +1739,52 @@ namespace aisa
               scale_idx = block_idx * args->blocks_J + j;
               if (scale_idx < total_scale_elems)
                 scale_w = args->B_scales[scale_idx];
-              if (cpu_fallback && j < 4) {
-                printf("[layer=%s][cpu_fallback] block_idx=%zu j=%zu scale_idx=%zu scale=%.6f\n",
-                       layer_name, block_idx, j, scale_idx, scale_w);
-              }
             }
-            float scale_out = args->scale_A * scale_w;
-            const float block_contrib = static_cast<float>(row_acc32[j]) * scale_out;
-            row_out[j] += block_contrib;
-            if (cpu_fallback && j < 4)
+
+            const float scale_out = args->scale_A * scale_w;
+            const acc_t acc32 = row_acc32[j];
+            const float contrib = static_cast<float>(acc32) * scale_out;
+
+            const float post = contrib;
+            row_out[j] += post;
+
+            // 참조 재적분(ref): 동일 block_K 범위만 qA*qB*scale_A*scale_w 합산
+            float ref = 0.0f;
+            for (size_t kk = 0; kk < block_K; ++kk)
             {
-              printf("[layer=%s][cpu_fallback] row=%zu col=%zu acc=%d scaled=%.6f\n",
-                     layer_name, i, j, row_acc32[j], block_contrib);
-              float ref = 0.0f;
-              for (size_t kk = 0; kk < block_K; ++kk)
-              {
-                const elem_t a_q = *(A_block + kk);
-                const elem_t b_q = *(B_block_cpu + kk * args->sB + j);
-                ref += static_cast<float>(a_q) * args->scale_A * static_cast<float>(b_q) * scale_w;
-              }
-              printf("[layer=%s][cpu_fallback] verify row=%zu col=%zu block=%zu contrib=%.6f ref=%.6f diff=%.6f\n",
-                     layer_name, i, j, block_idx, block_contrib, ref, ref - block_contrib);
+              const size_t a_off = !args->transpose_A ? (i * args->sA + kk) : (kk * args->sA + i);
+              const size_t b_off = !args->transpose_B ? (kk * args->sB + j) : (j * args->sB + kk);
+
+              const elem_t a_q = *(A_base + a_off);
+              const elem_t b_q = *(B_base + b_off);
+              ref += static_cast<float>(a_q) * args->scale_A * static_cast<float>(b_q) * scale_w;
+            }
+
+            const double diff = (double)ref - (double)contrib;
+            const double adiff = std::fabs(diff);
+            diff_abs_sum += adiff;
+            diff_sq_sum += diff * diff;
+            if (adiff > diff_max)
+              diff_max = adiff;
+            if (adiff > tol)
+              ++bad_cnt;
+
+            if (i < 1 && j < 4)
+            {
+              printf("[layer=%s][deq] block=%zu j=%zu scale_idx=%zu scale_w=%.6f\n",
+                     layer_name, block_idx, j, scale_idx, scale_w);
+              printf("[layer=%s][deq] row=%zu col=%zu acc=%d scale_out=%.6f contrib=%.6f post=%.6f\n",
+                     layer_name, i, j, (int)acc32, scale_out, contrib, post);
+              printf("[layer=%s][deq] verify row=%zu col=%zu block=%zu contrib=%.6f ref=%.6f diff=%.3e\n",
+                     layer_name, i, j, block_idx, contrib, ref, diff);
             }
           }
         }
+        const double denom = (double)dim_I * (double)dim_J;
+        const double mae = diff_abs_sum / denom;
+        const double rmse = std::sqrt(diff_sq_sum / denom);
+        printf("[layer=%s][deq.sum] block=%zu k_off=%zu K=%zu rows=%zu cols=%zu mae=%.3e rmse=%.3e max|diff|=%.3e bad>%.1e=%zu\n",
+               layer_name, block_idx, k_off, block_K, dim_I, dim_J, mae, rmse, diff_max, tol, bad_cnt);
       }
 
       k_offset += block_K;
