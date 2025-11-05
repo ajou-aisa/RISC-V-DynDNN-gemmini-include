@@ -1811,9 +1811,10 @@ namespace aisa
           for (size_t j = 0; j < dim_J; ++j)
           {
             float scale_w = 1.0f;
+            size_t scale_idx = 0;
             if (args->B_scales && block_idx < args->blocks_K)
             {
-              const size_t scale_idx = block_idx * args->blocks_J + j;
+              scale_idx = block_idx * args->blocks_J + j;
               if (scale_idx < total_scale_elems)
                 scale_w = args->B_scales[scale_idx];
               if (cpu_fallback && j < 4) {
@@ -1822,10 +1823,21 @@ namespace aisa
               }
             }
             float scale_out = args->scale_A * scale_w;
-            row_out[j] += static_cast<float>(row_acc32[j]) * scale_out;
-            if (cpu_fallback && j < 4) {
+            const float block_contrib = static_cast<float>(row_acc32[j]) * scale_out;
+            row_out[j] += block_contrib;
+            if (cpu_fallback && j < 4)
+            {
               printf("[layer=%s][cpu_fallback] row=%zu col=%zu acc=%d scaled=%.6f\n",
-                     layer_name, i, j, row_acc32[j], static_cast<float>(row_acc32[j]) * scale_out);
+                     layer_name, i, j, row_acc32[j], block_contrib);
+              float ref = 0.0f;
+              for (size_t kk = 0; kk < block_K; ++kk)
+              {
+                const elem_t a_q = *(A_block + kk);
+                const elem_t b_q = *(B_block_cpu + kk * args->sB + j);
+                ref += static_cast<float>(a_q) * args->scale_A * static_cast<float>(b_q) * scale_w;
+              }
+              printf("[layer=%s][cpu_fallback] verify row=%zu col=%zu block=%zu contrib=%.6f ref=%.6f diff=%.6f\n",
+                     layer_name, i, j, block_idx, block_contrib, ref, ref - block_contrib);
             }
           }
         }
