@@ -1130,12 +1130,12 @@ namespace aisa
     }
 
     const size_t call_seq = matmul_cpu_int32_call_seq++;
-    const bool debug_enabled = call_seq < 3;
+    const bool debug_enabled = true;
 
     if (!matmul_cpu_int32_header_logged && debug_enabled)
     {
       matmul_cpu_int32_header_logged = true;
-      printf("[matmul_cpu_int32] full_C debugging enabled (showing first 3 calls)\n");
+      printf("[matmul_cpu_int32] full_C debugging enabled (logging every call)\n");
     }
 
     if (debug_enabled)
