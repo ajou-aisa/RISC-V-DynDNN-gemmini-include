@@ -1713,6 +1713,8 @@ namespace aisa
 
     const bool cpu_fallback = tiled_matmul_type == CPU;
 
+    printf("[layer=%s][cpu_fallback] full_C=%d option=%d\n", layer_name, args->full_C, tiled_matmul_type);
+    
     // Gemmini 경로(full_C=true)와 CPU 폴백 모두 int32(acc_t) 누산 버퍼를 사용한다.
     static thread_local std::vector<acc_t> c_acc32;
     c_acc32.resize(dim_I * dim_J);
