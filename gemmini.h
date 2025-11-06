@@ -1630,7 +1630,7 @@ namespace aisa
 
     // tile size 디버깅
     const char *layer_name = args->layer_name ? args->layer_name : "";
-    printf("[layer=%s][tiled_matmul_auto_fp32] dim=(%zu,%zu,%zu) tiles=(%zu,%zu,%zu)\n",
+    fprintf(stderr, "[layer=%s][tiled_matmul_auto_fp32] dim=(%zu,%zu,%zu) tiles=(%zu,%zu,%zu)\n",
            layer_name, dim_I, dim_J, dim_K, tile_I, tile_J, tile_K);
 
     const bool cpu_fallback = tiled_matmul_type == CPU;
@@ -1721,7 +1721,7 @@ namespace aisa
         const elem_t *A_base = args->A + k_off;
         const elem_t *B_base = args->transpose_B ? (args->B + k_off) : (args->B + k_off * args->sB);
 
-        printf("[layer=%s][deq.block] block=%zu k_off=%zu K=%zu scale_A=%.6f act=%d bias=%d D_scale=%.6f\n",
+        fprintf(stderr, "[layer=%s][deq.block] block=%zu k_off=%zu K=%zu scale_A=%.6f act=%d bias=%d D_scale=%.6f\n",
                layer_name, block_idx, k_off, block_K, args->scale_A, act, (int)used_bias, (double)args->scale_D);
 
         for (size_t i = 0; i < dim_I; ++i)
@@ -1771,11 +1771,11 @@ namespace aisa
 
             if (i < 1 && j < 4)
             {
-              printf("[layer=%s][deq] block=%zu j=%zu scale_idx=%zu scale_w=%.6f\n",
+              fprintf(stderr, "[layer=%s][deq] block=%zu j=%zu scale_idx=%zu scale_w=%.6f\n",
                      layer_name, block_idx, j, scale_idx, scale_w);
-              printf("[layer=%s][deq] row=%zu col=%zu acc=%d scale_out=%.6f contrib=%.6f post=%.6f\n",
+              fprintf(stderr, "[layer=%s][deq] row=%zu col=%zu acc=%d scale_out=%.6f contrib=%.6f post=%.6f\n",
                      layer_name, i, j, (int)acc32, scale_out, contrib, post);
-              printf("[layer=%s][deq] verify row=%zu col=%zu block=%zu contrib=%.6f ref=%.6f diff=%.3e\n",
+              fprintf(stderr, "[layer=%s][deq] verify row=%zu col=%zu block=%zu contrib=%.6f ref=%.6f diff=%.3e\n",
                      layer_name, i, j, block_idx, contrib, ref, diff);
             }
           }
@@ -1783,7 +1783,7 @@ namespace aisa
         const double denom = (double)dim_I * (double)dim_J;
         const double mae = diff_abs_sum / denom;
         const double rmse = std::sqrt(diff_sq_sum / denom);
-        printf("[layer=%s][deq.sum] block=%zu k_off=%zu K=%zu rows=%zu cols=%zu mae=%.3e rmse=%.3e max|diff|=%.3e bad>%.1e=%zu\n",
+        fprintf(stderr, "[layer=%s][deq.sum] block=%zu k_off=%zu K=%zu rows=%zu cols=%zu mae=%.3e rmse=%.3e max|diff|=%.3e bad>%.1e=%zu\n",
                layer_name, block_idx, k_off, block_K, dim_I, dim_J, mae, rmse, diff_max, tol, bad_cnt);
       }
 
@@ -1950,7 +1950,7 @@ static void tiled_matmul_auto(size_t dim_I, size_t dim_J, size_t dim_K,
 
  uint64_t  end_cycles = read_cycles(); //added by DK
     gemmini_tiled_matmul_cycles += (end_cycles - start_cycles); //added by DK
-    printf("[tiled_matmul_auto] start = %lu, end = %lu, elapsed = %lu\n ",start_cycles, end_cycles, end_cycles-start_cycles);//added by DK
+    fprintf(stderr, "[tiled_matmul_auto] start = %lu, end = %lu, elapsed = %lu\n ",start_cycles, end_cycles, end_cycles-start_cycles);//added by DK
 
 }
 
