@@ -1631,7 +1631,7 @@ namespace aisa
     // tile size 디버깅
     const char *layer_name = args->layer_name ? args->layer_name : "";
     fprintf(stderr, "[layer=%s][tiled_matmul_auto_fp32] dim=(%zu,%zu,%zu) tiles=(%zu,%zu,%zu)\n",
-           layer_name, dim_I, dim_J, dim_K, tile_I, tile_J, tile_K);
+            layer_name, dim_I, dim_J, dim_K, tile_I, tile_J, tile_K);
 
     const bool cpu_fallback = tiled_matmul_type == CPU;
 
@@ -1649,30 +1649,29 @@ namespace aisa
         std::fill(f_out + i * stride_f_out, f_out + i * stride_f_out + dim_J, 0.0f);
 
     // Gemmini가 한 번에 소화할 수 있는 K 타일 수(max_block_elems)와 Q8_0 블록 크기(block_granularity)를 결합해 실제 한 반복에서 처리할 K 크기를 결정
+    GGML_ASSERT(args->block_size_k > 0);
     const size_t max_block_elems = tile_K * DIM;
-    const size_t block_granularity = std::max<size_t>(1, args->block_size_k);
-    const size_t chunk_elems = std::min(max_block_elems, block_granularity);
-    GGML_ASSERT(chunk_elems > 0);
 
     // 가중치 스케일 테이블은 (blocks_K x blocks_J) 크기. 범위 체크에 사용.
     const size_t total_scale_elems = args->blocks_K * args->blocks_J;
 
     size_t k_offset = 0;
-    size_t block_idx = 0;
     bool first_block = true;
 
     while (k_offset < dim_K)
     {
-      const size_t remaining_k = dim_K - k_offset;                                    // 아직 처리되지 않은 K 길이
-      const size_t block_K = std::min(chunk_elems, remaining_k);                      // 이번 반복에서 실제로 계산에 사용할 K 요소 개수
-      const size_t block_tiles = (block_K + DIM - 1) / DIM;                           // block_K를 DIM 크기 타일로 나눴을 때 필요한 타일 수
-      const size_t block_tile_K = std::max<size_t>(1, std::min(tile_K, block_tiles)); // auto tiler가 제안한 tile_K와 현재 블록에 필요한 타일 수 중 작은 값 (최소 1)
+      const size_t remaining_k = dim_K - k_offset;      // 아직 처리되지 않은 K 길이
+      const size_t blk = k_offset / args->block_size_k; // 현재 위치가 속한 Q8_0 블록
+      const size_t off_in_blk = k_offset % args->block_size_k;
+      const size_t to_boundary = args->block_size_k - off_in_blk; // 해당 블록 경계까지 남은 길이
+      const size_t block_K = std::min({remaining_k, max_block_elems, to_boundary});
+      const size_t block_tiles = (block_K + DIM - 1) / DIM;
+      const size_t block_tile_K = std::max<size_t>(1, std::min(tile_K, block_tiles));
 
-      // 이전 블록에서 남아있는 잔여 값을 제거하고 fresh accumulation을 수행.
+      // 새 누적 시작
       std::fill(c_acc32.begin(), c_acc32.end(), 0);
 
-      // A,B는 row-major 형태이므로 현재 K 블록만큼 쉬프트한 포인터를 넘김
-      // bias(D)는 첫 반복에서만 전달해 중복 더하기를 회피
+      // 포인터 슬라이스 및 bias(첫 반복만)
       const elem_t *A_block = args->A + k_offset;
       const elem_t *B_block_hw = args->B + k_offset;
       const elem_t *B_block_cpu = args->transpose_B ? (args->B + k_offset) : (args->B + k_offset * args->sB);
@@ -1721,8 +1720,8 @@ namespace aisa
         const elem_t *A_base = args->A + k_off;
         const elem_t *B_base = args->transpose_B ? (args->B + k_off) : (args->B + k_off * args->sB);
 
-        fprintf(stderr, "[layer=%s][deq.block] block=%zu k_off=%zu K=%zu scale_A=%.6f act=%d bias=%d D_scale=%.6f\n",
-               layer_name, block_idx, k_off, block_K, args->scale_A, act, (int)used_bias, (double)args->scale_D);
+        fprintf(stderr, "[layer=%s][deq.block] blk=%zu k_off=%zu K=%zu scale_A=%.6f act=%d bias=%d D_scale=%.6f\n",
+                layer_name, blk, k_off, block_K, args->scale_A, act, (int)used_bias, (double)args->scale_D);
 
         for (size_t i = 0; i < dim_I; ++i)
         {
@@ -1734,9 +1733,9 @@ namespace aisa
             // per-block weight scale 조회
             float scale_w = 1.0f;
             size_t scale_idx = 0;
-            if (args->B_scales && block_idx < args->blocks_K)
+            if (args->B_scales && blk < args->blocks_K)
             {
-              scale_idx = block_idx * args->blocks_J + j;
+              scale_idx = blk * args->blocks_J + j;
               if (scale_idx < total_scale_elems)
                 scale_w = args->B_scales[scale_idx];
             }
@@ -1771,12 +1770,12 @@ namespace aisa
 
             if (i < 1 && j < 4)
             {
-              fprintf(stderr, "[layer=%s][deq] block=%zu j=%zu scale_idx=%zu scale_w=%.6f\n",
-                     layer_name, block_idx, j, scale_idx, scale_w);
+              fprintf(stderr, "[layer=%s][deq] blk=%zu j=%zu scale_idx=%zu scale_w=%.6f\n",
+                      layer_name, blk, j, scale_idx, scale_w);
               fprintf(stderr, "[layer=%s][deq] row=%zu col=%zu acc=%d scale_out=%.6f contrib=%.6f post=%.6f\n",
-                     layer_name, i, j, (int)acc32, scale_out, contrib, post);
+                      layer_name, i, j, (int)acc32, scale_out, contrib, post);
               fprintf(stderr, "[layer=%s][deq] verify row=%zu col=%zu block=%zu contrib=%.6f ref=%.6f diff=%.3e\n",
-                     layer_name, i, j, block_idx, contrib, ref, diff);
+                      layer_name, i, j, block_idx, contrib, ref, diff);
             }
           }
         }
@@ -1784,11 +1783,10 @@ namespace aisa
         const double mae = diff_abs_sum / denom;
         const double rmse = std::sqrt(diff_sq_sum / denom);
         fprintf(stderr, "[layer=%s][deq.sum] block=%zu k_off=%zu K=%zu rows=%zu cols=%zu mae=%.3e rmse=%.3e max|diff|=%.3e bad>%.1e=%zu\n",
-               layer_name, block_idx, k_off, block_K, dim_I, dim_J, mae, rmse, diff_max, tol, bad_cnt);
+                layer_name, block_idx, k_off, block_K, dim_I, dim_J, mae, rmse, diff_max, tol, bad_cnt);
       }
 
       k_offset += block_K;
-      ++block_idx;
       first_block = false;
     }
 
