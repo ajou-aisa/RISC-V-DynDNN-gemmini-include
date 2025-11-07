@@ -1774,16 +1774,16 @@ namespace aisa
                       layer_name, blk, j, scale_idx, scale_w);
               fprintf(stderr, "[layer=%s][deq] row=%zu col=%zu acc=%d scale_out=%.6f contrib=%.6f post=%.6f\n",
                       layer_name, i, j, (int)acc32, scale_out, contrib, post);
-              fprintf(stderr, "[layer=%s][deq] verify row=%zu col=%zu block=%zu contrib=%.6f ref=%.6f diff=%.3e\n",
-                      layer_name, i, j, block_idx, contrib, ref, diff);
+              fprintf(stderr, "[layer=%s][deq] verify row=%zu col=%zu blk=%zu contrib=%.6f ref=%.6f diff=%.3e\n",
+                      layer_name, i, j, blk, contrib, ref, diff);
             }
           }
         }
         const double denom = (double)dim_I * (double)dim_J;
         const double mae = diff_abs_sum / denom;
         const double rmse = std::sqrt(diff_sq_sum / denom);
-        fprintf(stderr, "[layer=%s][deq.sum] block=%zu k_off=%zu K=%zu rows=%zu cols=%zu mae=%.3e rmse=%.3e max|diff|=%.3e bad>%.1e=%zu\n",
-                layer_name, block_idx, k_off, block_K, dim_I, dim_J, mae, rmse, diff_max, tol, bad_cnt);
+        fprintf(stderr, "[layer=%s][deq.sum] blk=%zu k_off=%zu K=%zu rows=%zu cols=%zu mae=%.3e rmse=%.3e max|diff|=%.3e bad>%.1e=%zu\n",
+                layer_name, blk, k_off, block_K, dim_I, dim_J, mae, rmse, diff_max, tol, bad_cnt);
       }
 
       k_offset += block_K;
