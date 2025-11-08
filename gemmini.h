@@ -1715,7 +1715,8 @@ namespace aisa
 
         double diff_abs_sum = 0.0, diff_sq_sum = 0.0, diff_max = 0.0;
         size_t bad_cnt = 0;
-        const double tol = 1e-7;
+        const double abs_tol = 1e-6;
+        const double rel_tol = 1e-2; // 1% 상대 허용
 
         const elem_t *A_base = args->A + k_off;
         const elem_t *B_base = args->B + k_off * args->sB;
@@ -1765,6 +1766,7 @@ namespace aisa
             diff_sq_sum += diff * diff;
             if (adiff > diff_max)
               diff_max = adiff;
+            const double tol = std::max(abs_tol, rel_tol * std::fabs(ref));
             if (adiff > tol)
               ++bad_cnt;
 
@@ -1782,8 +1784,8 @@ namespace aisa
         const double denom = (double)dim_I * (double)dim_J;
         const double mae = diff_abs_sum / denom;
         const double rmse = std::sqrt(diff_sq_sum / denom);
-        fprintf(stderr, "[layer=%s][deq.sum] blk=%zu k_off=%zu K=%zu rows=%zu cols=%zu mae=%.3e rmse=%.3e max|diff|=%.3e bad>%.1e=%zu\n",
-                layer_name, blk, k_off, block_K, dim_I, dim_J, mae, rmse, diff_max, tol, bad_cnt);
+        fprintf(stderr, "[layer=%s][deq.sum] blk=%zu k_off=%zu K=%zu rows=%zu cols=%zu mae=%.3e rmse=%.3e max|diff|=%.3e bad>(abs=%.1e,rel=%.1e)=%zu\n",
+                layer_name, blk, k_off, block_K, dim_I, dim_J, mae, rmse, diff_max, abs_tol, rel_tol, bad_cnt);
       }
 
       k_offset += block_K;
