@@ -1674,7 +1674,7 @@ namespace aisa
       // 포인터 슬라이스 및 bias(첫 반복만)
       const elem_t *A_block = args->A + k_offset;
       const elem_t *B_block_hw = args->B + k_offset;
-      const elem_t *B_block_cpu = args->transpose_B ? (args->B + k_offset) : (args->B + k_offset * args->sB);
+      const elem_t *B_block_cpu = args->B + k_offset * args->sB;
 
       const void *D_block = first_block ? args->D : nullptr;
 
@@ -1687,7 +1687,7 @@ namespace aisa
                            1.0f, 1.0f, args->scale_D,
                            act, args->scale, args->bert_scale, args->repeating_bias,
                            tile_I, tile_J, block_tile_K,
-                           args->transpose_A, args->transpose_B,
+                           args->transpose_A, /*transpose_B=*/false,
                            true, args->low_D,
                            args->weightA,
                            tiled_matmul_type);
@@ -1718,7 +1718,7 @@ namespace aisa
         const double tol = 1e-7;
 
         const elem_t *A_base = args->A + k_off;
-        const elem_t *B_base = args->transpose_B ? (args->B + k_off) : (args->B + k_off * args->sB);
+        const elem_t *B_base = args->B + k_off * args->sB;
 
         fprintf(stderr, "[layer=%s][deq.block] blk=%zu k_off=%zu K=%zu scale_A=%.6f act=%d bias=%d D_scale=%.6f\n",
                 layer_name, blk, k_off, block_K, args->scale_A, act, (int)used_bias, (double)args->scale_D);
@@ -1752,7 +1752,7 @@ namespace aisa
             for (size_t kk = 0; kk < block_K; ++kk)
             {
               const size_t a_off = !args->transpose_A ? (i * args->sA + kk) : (kk * args->sA + i);
-              const size_t b_off = !args->transpose_B ? (kk * args->sB + j) : (j * args->sB + kk);
+              const size_t b_off = kk * args->sB + j;
 
               const elem_t a_q = *(A_base + a_off);
               const elem_t b_q = *(B_base + b_off);
