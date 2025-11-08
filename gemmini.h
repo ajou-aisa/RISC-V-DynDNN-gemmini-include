@@ -1648,9 +1648,16 @@ namespace aisa
     // 블록별로 float 결과를 누적할 때 편하게 더해 줄 수 있도록 fp32 출력 버퍼를 미리 0으로 클리어
     float *f_out = args->f_out;
     const size_t stride_f_out = args->stride_f_out;
+    const size_t col_stride_f_out = args->col_stride_f_out ? args->col_stride_f_out : 1;
     if (f_out != nullptr)
+    {
       for (size_t i = 0; i < dim_I; ++i)
-        std::fill(f_out + i * stride_f_out, f_out + i * stride_f_out + dim_J, 0.0f);
+      {
+        float *row_ptr = f_out + i * stride_f_out;
+        for (size_t j = 0; j < dim_J; ++j)
+          row_ptr[j * col_stride_f_out] = 0.0f;
+      }
+    }
 
     // Gemmini가 한 번에 소화할 수 있는 K 타일 수(max_block_elems)와 Q8_0 블록 크기(block_granularity)를 결합해 실제 한 반복에서 처리할 K 크기를 결정
     GGML_ASSERT(args->block_size_k > 0);
@@ -1758,7 +1765,7 @@ namespace aisa
             const float contrib = static_cast<float>(acc32) * scale_out;
 
             const float post = contrib;
-            row_out[j] += post;
+            row_out[j * col_stride_f_out] += post;
 
             // 참조 재적분(ref): 동일 block_K 범위만 qA*qB*scale_A*scale_w 합산
             float ref = 0.0f;
