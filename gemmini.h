@@ -72,6 +72,10 @@
 #define IGELU 3
 #define SOFTMAX 4
 
+#ifndef GEMMINI_KBLOCK_DEBUG
+#define GEMMINI_KBLOCK_DEBUG 0
+#endif
+
 #ifdef ELEM_T_IS_FLOAT
 elem_t elem_t_bits_to_elem_t(elem_t_bits x) {
     union {
@@ -1657,6 +1661,8 @@ namespace aisa
 
     size_t k_offset = 0;
     bool first_block = true;
+    size_t processed_k = 0;
+    size_t k_block_count = 0;
 
     while (k_offset < dim_K)
     {
@@ -1668,13 +1674,19 @@ namespace aisa
       const size_t block_tiles = (block_K + DIM - 1) / DIM;
       const size_t block_tile_K = std::max<size_t>(1, std::min(tile_K, block_tiles));
 
+#if GEMMINI_KBLOCK_DEBUG
+      fprintf(stderr, "[layer=%s][k-block] idx=%zu k_off=%zu block_K=%zu block_tile_K=%zu\n",
+              layer_name, k_block_count, k_offset, block_K, block_tile_K);
+#endif
+      processed_k += block_K;
+      ++k_block_count;
+
       // 새 누적 시작
       std::fill(c_acc32.begin(), c_acc32.end(), 0);
 
       // 포인터 슬라이스 및 bias(첫 반복만)
       const elem_t *A_block = args->A + k_offset;
-      const elem_t *B_block_hw = args->B + k_offset;
-      const elem_t *B_block_cpu = args->B + k_offset * args->sB;
+      const elem_t *B_block = args->B + k_offset * args->sB;
 
       const void *D_block = first_block ? args->D : nullptr;
 
@@ -1682,7 +1694,7 @@ namespace aisa
       if (cpu_fallback)
       {
         tiled_matmul_int32(dim_I, dim_J, block_K,
-                           A_block, B_block_cpu, D_block, acc_ptr,
+                           A_block, B_block, D_block, acc_ptr,
                            args->sA, args->sB, args->sD, dim_J,
                            1.0f, 1.0f, args->scale_D,
                            act, args->scale, args->bert_scale, args->repeating_bias,
@@ -1695,7 +1707,7 @@ namespace aisa
       else
       {
         tiled_matmul(dim_I, dim_J, block_K,
-                     A_block, B_block_hw, D_block, acc_ptr,
+                     A_block, B_block, D_block, acc_ptr,
                      args->sA, args->sB, args->sD, dim_J,
                      1.0f, 1.0f, args->scale_D,
                      act, args->scale, args->bert_scale, args->repeating_bias,
@@ -1791,6 +1803,12 @@ namespace aisa
       k_offset += block_K;
       first_block = false;
     }
+
+    GGML_ASSERT(processed_k == dim_K);
+#if GEMMINI_KBLOCK_DEBUG
+    fprintf(stderr, "[layer=%s][k-block.summary] blocks=%zu processed_K=%zu dim_K=%zu\n",
+            layer_name, k_block_count, processed_k, dim_K);
+#endif
 
 #ifdef PRINT_TILE
 #if PRINT_TILE
