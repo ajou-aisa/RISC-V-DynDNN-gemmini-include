@@ -1634,8 +1634,8 @@ namespace aisa
 
     // tile size 디버깅
     const char *layer_name = args->layer_name ? args->layer_name : "";
-    fprintf(stderr, "[layer=%s][tiled_matmul_auto_fp32] dim=(%zu,%zu,%zu) tiles=(%zu,%zu,%zu)\n",
-            layer_name, dim_I, dim_J, dim_K, tile_I, tile_J, tile_K);
+    // fprintf(stderr, "[layer=%s][tiled_matmul_auto_fp32] dim=(%zu,%zu,%zu) tiles=(%zu,%zu,%zu)\n",
+    //         layer_name, dim_I, dim_J, dim_K, tile_I, tile_J, tile_K);
 
     const bool cpu_fallback = tiled_matmul_type == CPU;
 
@@ -1682,8 +1682,8 @@ namespace aisa
       const size_t block_tile_K = std::max<size_t>(1, std::min(tile_K, block_tiles));
 
 #if GEMMINI_KBLOCK_DEBUG
-      fprintf(stderr, "[layer=%s][k-block] idx=%zu k_off=%zu block_K=%zu block_tile_K=%zu\n",
-              layer_name, k_block_count, k_offset, block_K, block_tile_K);
+      // fprintf(stderr, "[layer=%s][k-block] idx=%zu k_off=%zu block_K=%zu block_tile_K=%zu\n",
+      //         layer_name, k_block_count, k_offset, block_K, block_tile_K);
 #endif
       processed_k += block_K;
       ++k_block_count;
@@ -1740,8 +1740,8 @@ namespace aisa
         const elem_t *A_base = args->A + k_off;
         const elem_t *B_base = args->B + k_off * args->sB;
 
-        fprintf(stderr, "[layer=%s][deq.block] blk=%zu k_off=%zu K=%zu scale_A=%.6f act=%d bias=%d D_scale=%.6f\n",
-                layer_name, blk, k_off, block_K, args->scale_A, act, (int)used_bias, (double)args->scale_D);
+        // fprintf(stderr, "[layer=%s][deq.block] blk=%zu k_off=%zu K=%zu scale_A=%.6f act=%d bias=%d D_scale=%.6f\n",
+        //         layer_name, blk, k_off, block_K, args->scale_A, act, (int)used_bias, (double)args->scale_D);
 
         for (size_t i = 0; i < dim_I; ++i)
         {
@@ -1791,12 +1791,12 @@ namespace aisa
 
             if (i < 1 && j < 4)
             {
-              fprintf(stderr, "[layer=%s][deq] blk=%zu j=%zu scale_idx=%zu scale_w=%.6f\n",
-                      layer_name, blk, j, scale_idx, scale_w);
-              fprintf(stderr, "[layer=%s][deq] row=%zu col=%zu acc=%d scale_out=%.6f contrib=%.6f post=%.6f\n",
-                      layer_name, i, j, (int)acc32, scale_out, contrib, post);
-              fprintf(stderr, "[layer=%s][deq] verify row=%zu col=%zu blk=%zu contrib=%.6f ref=%.6f diff=%.3e\n",
-                      layer_name, i, j, blk, contrib, ref, diff);
+              // fprintf(stderr, "[layer=%s][deq] blk=%zu j=%zu scale_idx=%zu scale_w=%.6f\n",
+              //         layer_name, blk, j, scale_idx, scale_w);
+              // fprintf(stderr, "[layer=%s][deq] row=%zu col=%zu acc=%d scale_out=%.6f contrib=%.6f post=%.6f\n",
+              //         layer_name, i, j, (int)acc32, scale_out, contrib, post);
+              // fprintf(stderr, "[layer=%s][deq] verify row=%zu col=%zu blk=%zu contrib=%.6f ref=%.6f diff=%.3e\n",
+              //         layer_name, i, j, blk, contrib, ref, diff);
             }
           }
         }
@@ -1813,8 +1813,8 @@ namespace aisa
 
     GGML_ASSERT(processed_k == dim_K);
 #if GEMMINI_KBLOCK_DEBUG
-    fprintf(stderr, "[layer=%s][k-block.summary] blocks=%zu processed_K=%zu dim_K=%zu\n",
-            layer_name, k_block_count, processed_k, dim_K);
+    // fprintf(stderr, "[layer=%s][k-block.summary] blocks=%zu processed_K=%zu dim_K=%zu\n",
+    //         layer_name, k_block_count, processed_k, dim_K);
 #endif
 
 #ifdef PRINT_TILE
