@@ -28,6 +28,8 @@
 
 // llama.cpp의 args를 절대경로로 include 
 #include "/home/alveo/firesim/deploy/overlay/llama.cpp/ggml/src/ggml-gemmini/ggml-gemmini-args.h"
+#include "/home/alveo/firesim/deploy/overlay/llama.cpp/ggml/src/ggml-gemmini/ggml-gemmini-cycle.h"
+
 
 #define k_CONFIG 0
 #define k_MVIN2 1
