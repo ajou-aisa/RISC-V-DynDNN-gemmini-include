@@ -1530,6 +1530,7 @@ namespace aisa
   static void tiled_matmul_auto_fp32(struct ggml_gemmini_args_t *args)
   {
     // tile size와 block size 매칭을 통해, tiled별 연산 결과를 dequantize해서 llama.cpp의 output으로 전달
+    uint64_t start = read_cycles();
     if (args == NULL)
       return;
 
@@ -1697,6 +1698,11 @@ namespace aisa
 
       const void *D_block = first_block ? args->D : nullptr;
 
+      uint64_t end = read_cycles();
+      
+      PRINT_CYCLE(layer_name, "tiled_matmul_auto_fp32: Setting tile size", start, end, end - start);
+
+      start = read_cycles();
       // auto tiling으로 선정된 K 타일을 block에 매칭하여 block_tile_K를 사용해 호출
       if (cpu_fallback)
       {
@@ -1724,7 +1730,11 @@ namespace aisa
                      args->weightA,
                      tiled_matmul_type);
       }
+      end = read_cycles();
 
+      PRINT_CYCLE(layer_name, "tiled_matmul_auto_fp32: Calling tiled_matmul", start, end, end - start);
+
+      start = read_cycles();
       // Gemmini의 int32(acc_t) 결과를 float로 dequantize
       if (f_out != nullptr)
       {
@@ -1806,6 +1816,9 @@ namespace aisa
         // fprintf(stderr, "[layer=%s][deq.sum] blk=%zu k_off=%zu K=%zu rows=%zu cols=%zu mae=%.3e rmse=%.3e max|diff|=%.3e bad>(abs=%.1e,rel=%.1e)=%zu\n",
         //         layer_name, blk, k_off, block_K, dim_I, dim_J, mae, rmse, diff_max, abs_tol, rel_tol, bad_cnt);
       }
+
+      end = read_cycles();
+      PRINT_CYCLE(layer_name, "tiled_matmul_auto_fp32: Dequantize output to fp32", start, end, end - start);
 
       k_offset += block_K;
       first_block = false;
