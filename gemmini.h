@@ -84,11 +84,24 @@
 #define ACTIVATION_BLOCK_SCALE 1
 #endif
 
-#undef DBG_SIMPLE
+#ifndef DBG_SIMPLE
 #if GEMMINI_DEBUG
 #define DBG_SIMPLE(fmt, ...) fprintf(stderr, fmt "\n", ##__VA_ARGS__)
 #else
 #define DBG_SIMPLE(...) ((void)0)
+#endif
+#endif
+
+#ifndef PRINT_CYCLE
+#ifndef CYCLE_LOG
+#define CYCLE_LOG 0
+#endif
+#if CYCLE_LOG
+#define PRINT_CYCLE(...) \
+    fprintf(stderr, "[layer=%s][%s] start = %lu end = %lu elapsed = %lu\n", ##__VA_ARGS__)
+#else
+#define PRINT_CYCLE(...) ((void)0)
+#endif
 #endif
 
 #ifdef ELEM_T_IS_FLOAT
