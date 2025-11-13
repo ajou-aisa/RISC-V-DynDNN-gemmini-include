@@ -77,6 +77,12 @@
 #ifndef GEMMINI_KBLOCK_DEBUG
 #define GEMMINI_KBLOCK_DEBUG 0
 #endif
+#ifndef GEMMINI_DEBUG
+#define GEMMINI_DEBUG 0
+#endif
+#ifndef ACTIVATION_BLOCK_SCALE
+#define ACTIVATION_BLOCK_SCALE 1
+#endif
 
 #ifdef ELEM_T_IS_FLOAT
 elem_t elem_t_bits_to_elem_t(elem_t_bits x) {
@@ -1637,8 +1643,8 @@ namespace aisa
 
     // tile size 디버깅
     const char *layer_name = args->layer_name ? args->layer_name : "";
-    // fprintf(stderr, "[layer=%s][tiled_matmul_auto_fp32] dim=(%zu,%zu,%zu) tiles=(%zu,%zu,%zu)\n",
-    //         layer_name, dim_I, dim_J, dim_K, tile_I, tile_J, tile_K);
+    DBG_SIMPLE("[layer=%s][tiled_matmul_auto_fp32] dim=(%zu,%zu,%zu) tiles=(%zu,%zu,%zu)",
+               layer_name, dim_I, dim_J, dim_K, tile_I, tile_J, tile_K);
 
     const bool cpu_fallback = tiled_matmul_type == CPU;
 
@@ -1667,7 +1673,8 @@ namespace aisa
     const size_t max_block_elems = tile_K * DIM;
 
     // 가중치 스케일 테이블은 (blocks_K x blocks_J) 크기. 범위 체크에 사용.
-    const size_t total_scale_elems = args->blocks_K * args->blocks_J;
+    const size_t total_weight_scale_elems = args->blocks_K * args->blocks_J;
+    const size_t total_act_scale_elems = args->A_scale_rows * args->A_scale_cols;
 
     size_t k_offset = 0;
     bool first_block = true;
@@ -1685,8 +1692,8 @@ namespace aisa
       const size_t block_tile_K = std::max<size_t>(1, std::min(tile_K, block_tiles));
 
 #if GEMMINI_KBLOCK_DEBUG
-      // fprintf(stderr, "[layer=%s][k-block] idx=%zu k_off=%zu block_K=%zu block_tile_K=%zu\n",
-      //         layer_name, k_block_count, k_offset, block_K, block_tile_K);
+      DBG_SIMPLE("[layer=%s][k-block] idx=%zu k_off=%zu block_K=%zu block_tile_K=%zu",
+                 layer_name, k_block_count, k_offset, block_K, block_tile_K);
 #endif
       processed_k += block_K;
       ++k_block_count;
@@ -1752,8 +1759,8 @@ namespace aisa
         const elem_t *A_base = args->A + k_off;
         const elem_t *B_base = args->B + k_off * args->sB;
 
-        // fprintf(stderr, "[layer=%s][deq.block] blk=%zu k_off=%zu K=%zu scale_A=%.6f act=%d bias=%d D_scale=%.6f\n",
-        //         layer_name, blk, k_off, block_K, args->scale_A, act, (int)used_bias, (double)args->scale_D);
+        DBG_SIMPLE("[layer=%s][deq.block] blk=%zu k_off=%zu K=%zu scale_A=%.6f act=%d bias=%d D_scale=%.6f",
+                   layer_name, blk, k_off, block_K, args->scale_A, act, (int)used_bias, (double)args->scale_D);
 
         for (size_t i = 0; i < dim_I; ++i)
         {
@@ -1762,17 +1769,28 @@ namespace aisa
 
           for (size_t j = 0; j < dim_J; ++j)
           {
+            float scale_a = args->scale_A;
             // per-block weight scale 조회
             float scale_w = 1.0f;
-            size_t scale_idx = 0;
+            size_t weight_scale_idx = 0;
             if (args->B_scales && blk < args->blocks_K)
             {
-              scale_idx = blk * args->blocks_J + j;
-              if (scale_idx < total_scale_elems)
-                scale_w = args->B_scales[scale_idx];
+              weight_scale_idx = blk * args->blocks_J + j;
+              if (weight_scale_idx < total_weight_scale_elems)
+                scale_w = args->B_scales[weight_scale_idx];
             }
 
-            const float scale_out = args->scale_A * scale_w;
+#if ACTIVATION_BLOCK_SCALE
+            size_t act_scale_idx = 0;
+            if (args->A_scales && i < args->A_scale_rows && blk < args->A_scale_cols)
+            {
+              act_scale_idx = i * args->A_scale_cols + blk;
+              if (act_scale_idx < total_act_scale_elems)
+                scale_a = args->A_scales[act_scale_idx];
+            }
+#endif
+
+            const float scale_out = scale_a * scale_w;
             const acc_t acc32 = row_acc32[j];
             const float contrib = static_cast<float>(acc32) * scale_out;
 
@@ -1788,7 +1806,7 @@ namespace aisa
 
               const elem_t a_q = *(A_base + a_off);
               const elem_t b_q = *(B_base + b_off);
-              ref += static_cast<float>(a_q) * args->scale_A * static_cast<float>(b_q) * scale_w;
+              ref += static_cast<float>(a_q) * scale_a * static_cast<float>(b_q) * scale_w;
             }
 
             const double diff = (double)ref - (double)contrib;
@@ -1803,20 +1821,23 @@ namespace aisa
 
             if (i < 1 && j < 4)
             {
-              // fprintf(stderr, "[layer=%s][deq] blk=%zu j=%zu scale_idx=%zu scale_w=%.6f\n",
-              //         layer_name, blk, j, scale_idx, scale_w);
-              // fprintf(stderr, "[layer=%s][deq] row=%zu col=%zu acc=%d scale_out=%.6f contrib=%.6f post=%.6f\n",
-              //         layer_name, i, j, (int)acc32, scale_out, contrib, post);
-              // fprintf(stderr, "[layer=%s][deq] verify row=%zu col=%zu blk=%zu contrib=%.6f ref=%.6f diff=%.3e\n",
-              //         layer_name, i, j, blk, contrib, ref, diff);
+              DBG_SIMPLE("[layer=%s][deq] blk=%zu j=%zu w_idx=%zu scale_w=%.6f", layer_name, blk, j, weight_scale_idx, scale_w);
+#if ACTIVATION_BLOCK_SCALE
+              DBG_SIMPLE("[layer=%s][deq] blk=%zu j=%zu act_idx=%zu scale_a=%.6f",
+                         layer_name, blk, j, act_scale_idx, scale_a);
+#endif
+              DBG_SIMPLE("[layer=%s][deq] row=%zu col=%zu acc=%d scale_out=%.6f contrib=%.6f post=%.6f",
+                         layer_name, i, j, (int)acc32, scale_out, contrib, post);
+              DBG_SIMPLE("[layer=%s][deq] verify row=%zu col=%zu blk=%zu contrib=%.6f ref=%.6f diff=%.3e",
+                         layer_name, i, j, blk, contrib, ref, diff);
             }
           }
         }
         const double denom = (double)dim_I * (double)dim_J;
         const double mae = diff_abs_sum / denom;
         const double rmse = std::sqrt(diff_sq_sum / denom);
-        // fprintf(stderr, "[layer=%s][deq.sum] blk=%zu k_off=%zu K=%zu rows=%zu cols=%zu mae=%.3e rmse=%.3e max|diff|=%.3e bad>(abs=%.1e,rel=%.1e)=%zu\n",
-        //         layer_name, blk, k_off, block_K, dim_I, dim_J, mae, rmse, diff_max, abs_tol, rel_tol, bad_cnt);
+        DBG_SIMPLE("[layer=%s][deq.sum] blk=%zu k_off=%zu K=%zu rows=%zu cols=%zu mae=%.3e rmse=%.3e max|diff|=%.3e bad>(abs=%.1e,rel=%.1e)=%zu",
+                   layer_name, blk, k_off, block_K, dim_I, dim_J, mae, rmse, diff_max, abs_tol, rel_tol, bad_cnt);
       }
 
       end = read_cycles();
@@ -1828,8 +1849,8 @@ namespace aisa
 
     GGML_ASSERT(processed_k == dim_K);
 #if GEMMINI_KBLOCK_DEBUG
-    // fprintf(stderr, "[layer=%s][k-block.summary] blocks=%zu processed_K=%zu dim_K=%zu\n",
-    //         layer_name, k_block_count, processed_k, dim_K);
+    DBG_SIMPLE("[layer=%s][k-block.summary] blocks=%zu processed_K=%zu dim_K=%zu",
+               layer_name, k_block_count, processed_k, dim_K);
 #endif
 
 #ifdef PRINT_TILE
