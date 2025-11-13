@@ -84,6 +84,13 @@
 #define ACTIVATION_BLOCK_SCALE 1
 #endif
 
+#undef DBG_SIMPLE
+#if GEMMINI_DEBUG
+#define DBG_SIMPLE(fmt, ...) fprintf(stderr, fmt "\n", ##__VA_ARGS__)
+#else
+#define DBG_SIMPLE(...) ((void)0)
+#endif
+
 #ifdef ELEM_T_IS_FLOAT
 elem_t elem_t_bits_to_elem_t(elem_t_bits x) {
     union {
