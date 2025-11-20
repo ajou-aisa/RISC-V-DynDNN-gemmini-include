@@ -14,21 +14,23 @@
 #include <algorithm>
 #include <vector>
 
-#include "include/gemmini_params.h"
+#include "gemmini_params.h"
 
-#include "include/cyclereader.h"//added by Dongkyu
+#include "cyclereader.h"//added by Dongkyu
 
 #define GEMMINI_ASSERTIONS
 
 // Accelerator interface
+#ifdef __riscv
 #include "rocc-software/src/xcustom.h"
+#endif
 
 // Counter Definition
-#include "include/gemmini_counter.h"
+#include "gemmini_counter.h"
 
-// llama.cpp의 args를 절대경로로 include 
-#include "/home/alveo/firesim/deploy/overlay/llama.cpp/ggml/src/ggml-gemmini/ggml-gemmini-args.h"
-#include "/home/alveo/firesim/deploy/overlay/llama.cpp/ggml/src/ggml-gemmini/ggml-gemmini-cycle.h"
+// llama.cpp의 args를 include (relative to repo)
+#include "ggml-gemmini-args.h"
+#include "ggml-gemmini-cycle.h"
 
 
 #define k_CONFIG 0
@@ -230,8 +232,20 @@ static acc_scale_t_bits acc_scale_t_to_acc_scale_t_bits(acc_scale_t x) {
     return un.b;
 }
 
+#ifdef __riscv
 #define ROCC_INSTRUCTION_RS1_RS2(x, rs1, rs2, funct) \
   ROCC_INSTRUCTION_0_R_R(x, rs1, rs2, funct)
+#else
+#define ROCC_INSTRUCTION(...)         do { } while (0);
+#define ROCC_INSTRUCTION_RS1_RS2(...) do { } while (0);
+#define ROCC_INSTRUCTION_R_R_R(...)   do { } while (0);
+#define ROCC_INSTRUCTION_R_R_I(...)   do { } while (0);
+#define ROCC_INSTRUCTION_R_R(...)     do { } while (0);
+#define ROCC_INSTRUCTION_RW_R(...)    do { } while (0);
+#define ROCC_INSTRUCTION_RS(...)      do { } while (0);
+#define ROCC_INSTRUCTION_S(...)       do { } while (0);
+#define ROCC_INSTRUCTION_0_R_R(...)   do { } while (0);
+#endif
 
 // mvin and mvout
 #define gemmini_extended_mvin(dram_addr, spad_addr, cols, rows) \
@@ -328,8 +342,14 @@ static acc_scale_t_bits acc_scale_t_to_acc_scale_t_bits(acc_scale_t x) {
   ROCC_INSTRUCTION_RS1_RS2(XCUSTOM_ACC, skip, 0, k_FLUSH)
 
 // fence
+#ifdef __riscv
 #define gemmini_fence() asm volatile("fence")
+#else
+#undef gemmini_fence
+#define gemmini_fence() ((void)0)
+#endif
 
+#ifdef __riscv
 // Counter access
 #define gemmini_counter_access(rd, config_reg) \
   { \
@@ -377,6 +397,14 @@ static void counter_reset() {
   uint32_t placeholder;
   gemmini_counter_access(placeholder, config_reg);
 }
+#else
+#define gemmini_counter_access(...) do { } while (0)
+static inline uint32_t counter_read(size_t) { return 0; }
+static inline void counter_configure(size_t, size_t) {}
+static inline void counter_snapshot_take() {}
+static inline void counter_snapshot_reset() {}
+static inline void counter_reset() {}
+#endif
 
 // modified by Youngshin --make ceil_divide_int to static inline func
 static inline int ceil_divide_int(int a, int b){
