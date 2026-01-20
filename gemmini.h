@@ -16,8 +16,6 @@
 
 #include "gemmini_params.h"
 
-#include "cyclereader.h"//added by Dongkyu
-
 #define GEMMINI_ASSERTIONS
 
 // Accelerator interface
@@ -31,6 +29,7 @@
 // llama.cpp의 args를 include (relative to repo)
 #include "ggml-gemmini-args.h"
 #include <orca/log.h>
+#include <orca/cycle/cycle_reader.hpp>
 
 #define k_CONFIG 0
 #define k_MVIN2 1
@@ -1567,7 +1566,7 @@ namespace aisa
     const char *layer = args->layer_name ? args->layer_name : "";
 
     // tile size와 block size 매칭을 통해, tiled별 연산 결과를 dequantize해서 llama.cpp의 output으로 전달
-    uint64_t start = read_cycles();
+    uint64_t start = orca::cycle::read();
     if (args == NULL)
       return;
 
@@ -1734,10 +1733,10 @@ namespace aisa
 
       const void *D_block = first_block ? args->D : nullptr;
 
-      uint64_t end = read_cycles();
-      orca_log_cycle(layer, "tiled_matmul_auto_fp32: Setting tile size", start, end);
+      uint64_t end = orca::cycle::read();
+      orca_log_cycle(layer, "[tiled_matmul_auto_fp32] cpu.Setting tile dividing by block-size", start, end);
 
-      start = read_cycles();
+      start = orca::cycle::read();
       // auto tiling으로 선정된 K 타일을 block에 매칭하여 block_tile_K를 사용해 호출
       if (cpu_fallback)
       {
@@ -1765,10 +1764,10 @@ namespace aisa
                      args->weightA,
                      tiled_matmul_type);
       }
-      end = read_cycles();
-      orca_log_cycle(layer, "tiled_matmul_auto_fp32: Calling tiled_matmul", start, end);
+      end = orca::cycle::read();
+      orca_log_cycle(layer, "[tiled_matmul_auto_fp32] npu.Gemmini HW tiled_matmul", start, end);
 
-      start = read_cycles();
+      start = orca::cycle::read();
       // Gemmini의 int32(acc_t) 결과를 float로 dequantize
       if (f_out != nullptr)
       {
@@ -1866,8 +1865,8 @@ namespace aisa
         //                blk, k_off, block_K, dim_I, dim_J, mae, rmse, diff_max, abs_tol, rel_tol, bad_cnt);
       }
 
-      end = read_cycles();
-      orca_log_cycle(layer, "tiled_matmul_auto_fp32: Dequantize output to fp32", start, end);
+      end = orca::cycle::read();
+      orca_log_cycle(layer, "[tiled_matmul_auto_fp32] cpu.Dequantize output to fp32", start, end);
 
       k_offset += block_K;
       first_block = false;
@@ -1929,9 +1928,6 @@ static void tiled_matmul_auto(size_t dim_I, size_t dim_J, size_t dim_K,
         bool full_C, bool low_D,
         uint8_t weightA,
         enum tiled_matmul_type_t tiled_matmul_type) {
-
-        uint64_t start_cycles = read_cycles(); //added by DK
-
 #define partition_rows (BANK_NUM * BANK_ROWS / 2)
 #define mats_in_partition (partition_rows / DIM)
 #define mats_in_acc (ACC_ROWS / DIM)
@@ -2034,11 +2030,6 @@ static void tiled_matmul_auto(size_t dim_I, size_t dim_J, size_t dim_K,
 #undef mats_in_acc
 #undef max_tile_i_j
 #undef max_tile_k
-
- uint64_t  end_cycles = read_cycles(); //added by DK
-    gemmini_tiled_matmul_cycles += (end_cycles - start_cycles); //added by DK
-    fprintf(stderr, "[tiled_matmul_auto] start = %lu, end = %lu, elapsed = %lu\n ",start_cycles, end_cycles, end_cycles-start_cycles);//added by DK
-
 }
 
 
