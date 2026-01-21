@@ -80,7 +80,9 @@
 #ifndef ACTIVATION_BLOCK_SCALE
 #define ACTIVATION_BLOCK_SCALE 1
 #endif
-
+#ifndef GEMMINI_VERIFY_DEQ
+#define GEMMINI_VERIFY_DEQ 0
+#endif
 
 #ifdef ELEM_T_IS_FLOAT
 elem_t elem_t_bits_to_elem_t(elem_t_bits x) {
@@ -1821,6 +1823,7 @@ namespace aisa
             const float post = contrib;
             row_out[j * col_stride_f_out] += post;
 
+#if GEMMINI_VERIFY_DEQ
             // 참조 재적분(ref): 동일 block_K 범위만 qA*qB*scale_A*scale_w 합산
             float ref = 0.0f;
             for (size_t kk = 0; kk < block_K; ++kk)
@@ -1845,26 +1848,26 @@ namespace aisa
 
             if (i < 1 && j < 4)
             {
-              // orca_log_debug(layer, "[deq] blk=%zu j=%zu w_idx=%zu scale_w=%.6f", blk, j, weight_scale_idx, scale_w);
+              orca_log_debug(layer, "[deq] blk=%zu j=%zu w_idx=%zu scale_w=%.6f", blk, j, weight_scale_idx, scale_w);
 #if ACTIVATION_BLOCK_SCALE
-              // orca_log_debug(layer, "[deq] blk=%zu j=%zu act_idx=%zu scale_a=%.6f", blk, j, act_scale_idx, scale_a);
+              orca_log_debug(layer, "[deq] blk=%zu j=%zu act_idx=%zu scale_a=%.6f", blk, j, act_scale_idx, scale_a);
 #endif
-              // orca_log_debug(layer, "[deq] row=%zu col=%zu acc=%d scale_out=%.6f contrib=%.6f post=%.6f",
-              //                i, j, (int)acc32, scale_out, contrib, post);
+              orca_log_debug(layer, "[deq] row=%zu col=%zu acc=%d scale_out=%.6f contrib=%.6f post=%.6f",
+                             i, j, (int)acc32, scale_out, contrib, post);
 
-              // orca_log_debug(layer, "[deq] verify row=%zu col=%zu blk=%zu contrib=%.6f ref=%.6f diff=%.3e",
-              //                i, j, blk, contrib, ref, diff);
+              orca_log_debug(layer, "[deq] verify row=%zu col=%zu blk=%zu contrib=%.6f ref=%.6f diff=%.3e",
+                             i, j, blk, contrib, ref, diff);
             }
+#endif
           }
         }
         const double denom = (double)dim_I * (double)dim_J;
         const double mae = diff_abs_sum / denom;
         const double rmse = std::sqrt(diff_sq_sum / denom);
 
-        // orca_log_debug(layer, "[deq.sum] blk=%zu k_off=%zu K=%zu rows=%zu cols=%zu mae=%.3e rmse=%.3e max|diff|=%.3e bad>(abs=%.1e,rel=%.1e)=%zu",
-        //                blk, k_off, block_K, dim_I, dim_J, mae, rmse, diff_max, abs_tol, rel_tol, bad_cnt);
-      }
-
+        orca_log_debug(layer, "[deq.sum] blk=%zu k_off=%zu K=%zu rows=%zu cols=%zu mae=%.3e rmse=%.3e max|diff|=%.3e bad>(abs=%.1e,rel=%.1e)=%zu",
+                       blk, k_off, block_K, dim_I, dim_J, mae, rmse, diff_max, abs_tol, rel_tol, bad_cnt);
+                      }
       end = orca::cycle::read();
       orca_log_cycle(layer, "[tiled_matmul_auto_fp32] cpu.Dequantize output to fp32", start, end);
 
@@ -1874,8 +1877,8 @@ namespace aisa
 
     GGML_ASSERT(processed_k == dim_K);
 #if GEMMINI_KBLOCK_DEBUG
-    // orca_log_debug(layer, "[k-block.summary] blocks=%zu processed_K=%zu dim_K=%zu",
-    //                k_block_count, processed_k, dim_K);
+    orca_log_debug(layer, "[k-block.summary] blocks=%zu processed_K=%zu dim_K=%zu",
+                   k_block_count, processed_k, dim_K);
 #endif
 
 #ifdef PRINT_TILE
