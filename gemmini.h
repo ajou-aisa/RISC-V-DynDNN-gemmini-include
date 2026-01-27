@@ -16,8 +16,6 @@
 
 #include "gemmini_params.h"
 
-#include "cyclereader.h"//added by Dongkyu
-
 #define GEMMINI_ASSERTIONS
 
 // Accelerator interface
@@ -30,8 +28,8 @@
 
 // llama.cpp의 args를 include (relative to repo)
 #include "ggml-gemmini-args.h"
-#include "ggml-gemmini-cycle.h"
-
+#include <orca/log.h>
+#include <orca/cycle/cycle_reader.hpp>
 
 #define k_CONFIG 0
 #define k_MVIN2 1
@@ -79,31 +77,11 @@
 #ifndef GEMMINI_KBLOCK_DEBUG
 #define GEMMINI_KBLOCK_DEBUG 0
 #endif
-#ifndef GEMMINI_DEBUG
-#define GEMMINI_DEBUG 0
-#endif
 #ifndef ACTIVATION_BLOCK_SCALE
 #define ACTIVATION_BLOCK_SCALE 1
 #endif
-
-#ifndef DBG_SIMPLE
-#if GEMMINI_DEBUG
-#define DBG_SIMPLE(fmt, ...) fprintf(stderr, fmt "\n", ##__VA_ARGS__)
-#else
-#define DBG_SIMPLE(...) ((void)0)
-#endif
-#endif
-
-#ifndef PRINT_CYCLE
-#ifndef CYCLE_LOG
-#define CYCLE_LOG 0
-#endif
-#if CYCLE_LOG
-#define PRINT_CYCLE(...) \
-    fprintf(stderr, "[layer=%s][%s] start = %lu end = %lu elapsed = %lu\n", ##__VA_ARGS__)
-#else
-#define PRINT_CYCLE(...) ((void)0)
-#endif
+#ifndef GEMMINI_VERIFY_DEQ
+#define GEMMINI_VERIFY_DEQ 0
 #endif
 
 #ifdef ELEM_T_IS_FLOAT
@@ -1585,8 +1563,12 @@ namespace aisa
 {
   static void tiled_matmul_auto_fp32(struct ggml_gemmini_args_t *args)
   {
+    orca_log_debug_set_output_path("log/debug-log.jsonl");
+    orca_log_cycle_set_output_path("log/cycle-log.jsonl");
+    const char *layer = args->layer_name ? args->layer_name : "";
+
     // tile size와 block size 매칭을 통해, tiled별 연산 결과를 dequantize해서 llama.cpp의 output으로 전달
-    uint64_t start = read_cycles();
+    uint64_t start = orca::cycle::read();
     if (args == NULL)
       return;
 
@@ -1690,9 +1672,8 @@ namespace aisa
     }
 
     // tile size 디버깅
-    const char *layer_name = args->layer_name ? args->layer_name : "";
-    DBG_SIMPLE("[layer=%s][tiled_matmul_auto_fp32] dim=(%zu,%zu,%zu) tiles=(%zu,%zu,%zu)",
-               layer_name, dim_I, dim_J, dim_K, tile_I, tile_J, tile_K);
+    // orca_log_debug(layer, "[tiled_matmul_auto_fp32] dim=(%zu,%zu,%zu) tiles=(%zu,%zu,%zu)",
+    //                dim_I, dim_J, dim_K, tile_I, tile_J, tile_K);
 
     const bool cpu_fallback = tiled_matmul_type == CPU;
 
@@ -1739,10 +1720,9 @@ namespace aisa
       const size_t block_tiles = (block_K + DIM - 1) / DIM;
       const size_t block_tile_K = std::max<size_t>(1, std::min(tile_K, block_tiles));
 
-#if GEMMINI_KBLOCK_DEBUG
-      DBG_SIMPLE("[layer=%s][k-block] idx=%zu k_off=%zu block_K=%zu block_tile_K=%zu",
-                 layer_name, k_block_count, k_offset, block_K, block_tile_K);
-#endif
+      // orca_log_debug(layer, "[k-block] idx=%zu k_off=%zu block_K=%zu block_tile_K=%zu",
+      //                k_block_count, k_offset, block_K, block_tile_K);
+
       processed_k += block_K;
       ++k_block_count;
 
@@ -1755,11 +1735,10 @@ namespace aisa
 
       const void *D_block = first_block ? args->D : nullptr;
 
-      uint64_t end = read_cycles();
-      
-      PRINT_CYCLE(layer_name, "tiled_matmul_auto_fp32: Setting tile size", start, end, end - start);
+      uint64_t end = orca::cycle::read();
+      orca_log_cycle(layer, "[tiled_matmul_auto_fp32] cpu.Setting tile dividing by block-size", start, end);
 
-      start = read_cycles();
+      start = orca::cycle::read();
       // auto tiling으로 선정된 K 타일을 block에 매칭하여 block_tile_K를 사용해 호출
       if (cpu_fallback)
       {
@@ -1787,11 +1766,10 @@ namespace aisa
                      args->weightA,
                      tiled_matmul_type);
       }
-      end = read_cycles();
+      end = orca::cycle::read();
+      orca_log_cycle(layer, "[tiled_matmul_auto_fp32] npu.Gemmini HW tiled_matmul", start, end);
 
-      PRINT_CYCLE(layer_name, "tiled_matmul_auto_fp32: Calling tiled_matmul", start, end, end - start);
-
-      start = read_cycles();
+      start = orca::cycle::read();
       // Gemmini의 int32(acc_t) 결과를 float로 dequantize
       if (f_out != nullptr)
       {
@@ -1807,8 +1785,8 @@ namespace aisa
         const elem_t *A_base = args->A + k_off;
         const elem_t *B_base = args->B + k_off * args->sB;
 
-        DBG_SIMPLE("[layer=%s][deq.block] blk=%zu k_off=%zu K=%zu scale_A=%.6f act=%d bias=%d D_scale=%.6f",
-                   layer_name, blk, k_off, block_K, args->scale_A, act, (int)used_bias, (double)args->scale_D);
+        // orca_log_debug(layer, "[deq.block] blk=%zu k_off=%zu K=%zu scale_A=%.6f act=%d bias=%d D_scale=%.6f",
+        //                blk, k_off, block_K, args->scale_A, act, (int)used_bias, (double)args->scale_D);
 
         for (size_t i = 0; i < dim_I; ++i)
         {
@@ -1845,6 +1823,7 @@ namespace aisa
             const float post = contrib;
             row_out[j * col_stride_f_out] += post;
 
+#if GEMMINI_VERIFY_DEQ
             // 참조 재적분(ref): 동일 block_K 범위만 qA*qB*scale_A*scale_w 합산
             float ref = 0.0f;
             for (size_t kk = 0; kk < block_K; ++kk)
@@ -1869,27 +1848,28 @@ namespace aisa
 
             if (i < 1 && j < 4)
             {
-              DBG_SIMPLE("[layer=%s][deq] blk=%zu j=%zu w_idx=%zu scale_w=%.6f", layer_name, blk, j, weight_scale_idx, scale_w);
+              orca_log_debug(layer, "[deq] blk=%zu j=%zu w_idx=%zu scale_w=%.6f", blk, j, weight_scale_idx, scale_w);
 #if ACTIVATION_BLOCK_SCALE
-              DBG_SIMPLE("[layer=%s][deq] blk=%zu j=%zu act_idx=%zu scale_a=%.6f",
-                         layer_name, blk, j, act_scale_idx, scale_a);
+              orca_log_debug(layer, "[deq] blk=%zu j=%zu act_idx=%zu scale_a=%.6f", blk, j, act_scale_idx, scale_a);
 #endif
-              DBG_SIMPLE("[layer=%s][deq] row=%zu col=%zu acc=%d scale_out=%.6f contrib=%.6f post=%.6f",
-                         layer_name, i, j, (int)acc32, scale_out, contrib, post);
-              DBG_SIMPLE("[layer=%s][deq] verify row=%zu col=%zu blk=%zu contrib=%.6f ref=%.6f diff=%.3e",
-                         layer_name, i, j, blk, contrib, ref, diff);
+              orca_log_debug(layer, "[deq] row=%zu col=%zu acc=%d scale_out=%.6f contrib=%.6f post=%.6f",
+                             i, j, (int)acc32, scale_out, contrib, post);
+
+              orca_log_debug(layer, "[deq] verify row=%zu col=%zu blk=%zu contrib=%.6f ref=%.6f diff=%.3e",
+                             i, j, blk, contrib, ref, diff);
             }
+#endif
           }
         }
         const double denom = (double)dim_I * (double)dim_J;
         const double mae = diff_abs_sum / denom;
         const double rmse = std::sqrt(diff_sq_sum / denom);
-        DBG_SIMPLE("[layer=%s][deq.sum] blk=%zu k_off=%zu K=%zu rows=%zu cols=%zu mae=%.3e rmse=%.3e max|diff|=%.3e bad>(abs=%.1e,rel=%.1e)=%zu",
-                   layer_name, blk, k_off, block_K, dim_I, dim_J, mae, rmse, diff_max, abs_tol, rel_tol, bad_cnt);
-      }
 
-      end = read_cycles();
-      PRINT_CYCLE(layer_name, "tiled_matmul_auto_fp32: Dequantize output to fp32", start, end, end - start);
+        orca_log_debug(layer, "[deq.sum] blk=%zu k_off=%zu K=%zu rows=%zu cols=%zu mae=%.3e rmse=%.3e max|diff|=%.3e bad>(abs=%.1e,rel=%.1e)=%zu",
+                       blk, k_off, block_K, dim_I, dim_J, mae, rmse, diff_max, abs_tol, rel_tol, bad_cnt);
+                      }
+      end = orca::cycle::read();
+      orca_log_cycle(layer, "[tiled_matmul_auto_fp32] cpu.Dequantize output to fp32", start, end);
 
       k_offset += block_K;
       first_block = false;
@@ -1897,8 +1877,8 @@ namespace aisa
 
     GGML_ASSERT(processed_k == dim_K);
 #if GEMMINI_KBLOCK_DEBUG
-    DBG_SIMPLE("[layer=%s][k-block.summary] blocks=%zu processed_K=%zu dim_K=%zu",
-               layer_name, k_block_count, processed_k, dim_K);
+    orca_log_debug(layer, "[k-block.summary] blocks=%zu processed_K=%zu dim_K=%zu",
+                   k_block_count, processed_k, dim_K);
 #endif
 
 #ifdef PRINT_TILE
@@ -1951,9 +1931,6 @@ static void tiled_matmul_auto(size_t dim_I, size_t dim_J, size_t dim_K,
         bool full_C, bool low_D,
         uint8_t weightA,
         enum tiled_matmul_type_t tiled_matmul_type) {
-
-        uint64_t start_cycles = read_cycles(); //added by DK
-
 #define partition_rows (BANK_NUM * BANK_ROWS / 2)
 #define mats_in_partition (partition_rows / DIM)
 #define mats_in_acc (ACC_ROWS / DIM)
@@ -2056,11 +2033,6 @@ static void tiled_matmul_auto(size_t dim_I, size_t dim_J, size_t dim_K,
 #undef mats_in_acc
 #undef max_tile_i_j
 #undef max_tile_k
-
- uint64_t  end_cycles = read_cycles(); //added by DK
-    gemmini_tiled_matmul_cycles += (end_cycles - start_cycles); //added by DK
-    fprintf(stderr, "[tiled_matmul_auto] start = %lu, end = %lu, elapsed = %lu\n ",start_cycles, end_cycles, end_cycles-start_cycles);//added by DK
-
 }
 
 
