@@ -80,9 +80,6 @@
 #ifndef ACTIVATION_BLOCK_SCALE
 #define ACTIVATION_BLOCK_SCALE 1
 #endif
-#ifndef GEMMINI_VERIFY_DEQ
-#define GEMMINI_VERIFY_DEQ 0
-#endif
 
 #ifdef ELEM_T_IS_FLOAT
 elem_t elem_t_bits_to_elem_t(elem_t_bits x) {
@@ -1701,7 +1698,7 @@ namespace aisa
     GGML_ASSERT(args->block_size_k > 0);
     const size_t max_block_elems = tile_K * DIM;
 
-    // 가중치 스케일 테이블은 (blocks_K x blocks_J) 크기. 범위 체크에 사용.
+    // 가중치 스케일 테이블은 (blocks_J x blocks_K) 크기, row-major. 범위 체크에 사용.
     const size_t total_weight_scale_elems = args->blocks_K * args->blocks_J;
     const size_t total_act_scale_elems = args->A_scale_rows * args->A_scale_cols;
 
@@ -1731,7 +1728,11 @@ namespace aisa
 
       // 포인터 슬라이스 및 bias(첫 반복만)
       const elem_t *A_block = args->A + k_offset;
-      const elem_t *B_block = args->B + k_offset * args->sB;
+      // JxK row-major (transpose_B=true): advance by column offset (k_offset).
+      // KxJ row-major (transpose_B=false): advance by row offset (k_offset * sB).
+      const elem_t *B_block = args->transpose_B
+                                  ? (args->B + k_offset)
+                                  : (args->B + k_offset * args->sB);
 
       const void *D_block = first_block ? args->D : nullptr;
 
@@ -1748,7 +1749,7 @@ namespace aisa
                            1.0f, 1.0f, args->scale_D,
                            act, args->scale, args->bert_scale, args->repeating_bias,
                            tile_I, tile_J, block_tile_K,
-                           args->transpose_A, /*transpose_B=*/false,
+                           args->transpose_A, args->transpose_B,
                            true, args->low_D,
                            args->weightA,
                            tiled_matmul_type);
@@ -1773,20 +1774,7 @@ namespace aisa
       // Gemmini의 int32(acc_t) 결과를 float로 dequantize
       if (f_out != nullptr)
       {
-        const size_t k_off = k_offset; // 이번 블록의 K 시작 오프셋
-        const bool used_bias = (D_block != nullptr);
         GGML_ASSERT(act == NO_ACTIVATION);
-
-        double diff_abs_sum = 0.0, diff_sq_sum = 0.0, diff_max = 0.0;
-        size_t bad_cnt = 0;
-        const double abs_tol = 1e-6;
-        const double rel_tol = 1e-2; // 1% 상대 허용
-
-        const elem_t *A_base = args->A + k_off;
-        const elem_t *B_base = args->B + k_off * args->sB;
-
-        // orca_log_debug(layer, "[deq.block] blk=%zu k_off=%zu K=%zu scale_A=%.6f act=%d bias=%d D_scale=%.6f",
-        //                blk, k_off, block_K, args->scale_A, act, (int)used_bias, (double)args->scale_D);
 
         for (size_t i = 0; i < dim_I; ++i)
         {
@@ -1801,7 +1789,8 @@ namespace aisa
             size_t weight_scale_idx = 0;
             if (args->B_scales && blk < args->blocks_K)
             {
-              weight_scale_idx = blk * args->blocks_J + j;
+              // Row-major by J: scale[row=j][blk]
+              weight_scale_idx = j * args->blocks_K + blk;
               if (weight_scale_idx < total_weight_scale_elems)
                 scale_w = args->B_scales[weight_scale_idx];
             }
@@ -1822,52 +1811,9 @@ namespace aisa
 
             const float post = contrib;
             row_out[j * col_stride_f_out] += post;
-
-#if GEMMINI_VERIFY_DEQ
-            // 참조 재적분(ref): 동일 block_K 범위만 qA*qB*scale_A*scale_w 합산
-            float ref = 0.0f;
-            for (size_t kk = 0; kk < block_K; ++kk)
-            {
-              const size_t a_off = !args->transpose_A ? (i * args->sA + kk) : (kk * args->sA + i);
-              const size_t b_off = kk * args->sB + j;
-
-              const elem_t a_q = *(A_base + a_off);
-              const elem_t b_q = *(B_base + b_off);
-              ref += static_cast<float>(a_q) * scale_a * static_cast<float>(b_q) * scale_w;
-            }
-
-            const double diff = (double)ref - (double)contrib;
-            const double adiff = std::fabs(diff);
-            diff_abs_sum += adiff;
-            diff_sq_sum += diff * diff;
-            if (adiff > diff_max)
-              diff_max = adiff;
-            const double tol = std::max(abs_tol, rel_tol * std::fabs(ref));
-            if (adiff > tol)
-              ++bad_cnt;
-
-            if (i < 1 && j < 4)
-            {
-              orca_log_debug(layer, "[deq] blk=%zu j=%zu w_idx=%zu scale_w=%.6f", blk, j, weight_scale_idx, scale_w);
-#if ACTIVATION_BLOCK_SCALE
-              orca_log_debug(layer, "[deq] blk=%zu j=%zu act_idx=%zu scale_a=%.6f", blk, j, act_scale_idx, scale_a);
-#endif
-              orca_log_debug(layer, "[deq] row=%zu col=%zu acc=%d scale_out=%.6f contrib=%.6f post=%.6f",
-                             i, j, (int)acc32, scale_out, contrib, post);
-
-              orca_log_debug(layer, "[deq] verify row=%zu col=%zu blk=%zu contrib=%.6f ref=%.6f diff=%.3e",
-                             i, j, blk, contrib, ref, diff);
-            }
-#endif
           }
         }
-        const double denom = (double)dim_I * (double)dim_J;
-        const double mae = diff_abs_sum / denom;
-        const double rmse = std::sqrt(diff_sq_sum / denom);
-
-        orca_log_debug(layer, "[deq.sum] blk=%zu k_off=%zu K=%zu rows=%zu cols=%zu mae=%.3e rmse=%.3e max|diff|=%.3e bad>(abs=%.1e,rel=%.1e)=%zu",
-                       blk, k_off, block_K, dim_I, dim_J, mae, rmse, diff_max, abs_tol, rel_tol, bad_cnt);
-                      }
+        }
       end = orca::cycle::read();
       orca_log_cycle(layer, "[tiled_matmul_auto_fp32] cpu.Dequantize output to fp32", start, end);
 
