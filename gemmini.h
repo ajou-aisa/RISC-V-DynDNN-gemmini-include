@@ -1707,8 +1707,6 @@ namespace aisa
     const size_t group_size_k = args->effective_group_size_k > 0
                                   ? args->effective_group_size_k
                                   : std::max<size_t>(1, args->block_size_k);
-    // Dequant requires consistent scale region per Gemmini call.
-    // Keep K-blocks inside both activation-group and weight-block boundaries.
     const size_t weight_block_k = args->block_size_k > 0
                                       ? static_cast<size_t>(args->block_size_k)
                                       : static_cast<size_t>(QK8_0);
@@ -1716,7 +1714,10 @@ namespace aisa
                                           ? args->effective_group_size_aligned
                                           : ((group_size_k + DIM - 1) / DIM) * DIM;
     const size_t group_tile_cap = std::max<size_t>(1, group_size_aligned / DIM);
-    tile_K = std::min(tile_K, group_tile_cap);
+    if (args->group_scope != GGML_GEMMINI_GROUP_TILE)
+    {
+      tile_K = std::min(tile_K, group_tile_cap);
+    }
     const size_t max_block_elems = tile_K * DIM;
 
     static thread_local std::vector<elem_t> a_stage;
@@ -1730,11 +1731,27 @@ namespace aisa
     while (k_offset < dim_K)
     {
       const size_t remaining_k = dim_K - k_offset;
+      size_t logical_block_K = std::min(remaining_k, max_block_elems);
       const size_t off_in_group = k_offset % group_size_k;
       const size_t to_group_boundary = group_size_k - off_in_group;
       const size_t off_in_weight_block = k_offset % weight_block_k;
       const size_t to_weight_boundary = weight_block_k - off_in_weight_block;
-      const size_t logical_block_K = std::min({remaining_k, max_block_elems, to_group_boundary, to_weight_boundary});
+
+      if (args->group_scope == GGML_GEMMINI_GROUP_TENSOR)
+      {
+        // Tensor activation scale is global, but weight scale is Q8_0-block.
+        logical_block_K = std::min(logical_block_K, to_weight_boundary);
+      }
+      else if (args->group_scope == GGML_GEMMINI_GROUP_BLOCK)
+      {
+        // Block mode must follow both activation-group and weight-block boundaries.
+        logical_block_K = std::min(logical_block_K, std::min(to_group_boundary, to_weight_boundary));
+      }
+      else if (args->group_scope != GGML_GEMMINI_GROUP_TILE && group_size_k < max_block_elems)
+      {
+        // Fallback for future scopes: only split when group is smaller than tile.
+        logical_block_K = std::min(logical_block_K, to_group_boundary);
+      }
       const size_t aligned_block_K = ((logical_block_K + DIM - 1) / DIM) * DIM;
       const size_t block_tiles = std::max<size_t>(1, aligned_block_K / DIM);
       const size_t block_tile_K = std::max<size_t>(1, std::min(tile_K, block_tiles));
