@@ -31,6 +31,15 @@
 #include <orca/log.h>
 #include <orca/cycle/cycle_reader.hpp>
 
+namespace orca::ggml {
+  void ggml_gemmini_prepare_group_meta(ggml_gemmini_args_t &args);
+  void ggml_gemmini_dequant_acc_block(const ggml_gemmini_args_t &args,
+                                      size_t k_offset,
+                                      size_t block_k,
+                                      const int32_t *acc32,
+                                      size_t acc_stride);
+}
+
 #define k_CONFIG 0
 #define k_MVIN2 1
 #define k_MVIN 2
@@ -79,9 +88,6 @@
 #endif
 #ifndef ACTIVATION_BLOCK_SCALE
 #define ACTIVATION_BLOCK_SCALE 1
-#endif
-#ifndef GEMMINI_VERIFY_DEQ
-#define GEMMINI_VERIFY_DEQ 0
 #endif
 
 #ifdef ELEM_T_IS_FLOAT
@@ -1672,8 +1678,8 @@ namespace aisa
     }
 
     // tile size 디버깅
-    // orca_log_debug(layer, "[tiled_matmul_auto_fp32] dim=(%zu,%zu,%zu) tiles=(%zu,%zu,%zu)",
-    //                dim_I, dim_J, dim_K, tile_I, tile_J, tile_K);
+    orca_log_debug_layer(layer, "[tiled_matmul_auto_fp32] dim=(%zu,%zu,%zu) tiles=(%zu,%zu,%zu)",
+                   dim_I, dim_J, dim_K, tile_I, tile_J, tile_K);
 
     const bool cpu_fallback = tiled_matmul_type == CPU;
 
@@ -1697,13 +1703,25 @@ namespace aisa
       }
     }
 
-    // Gemmini가 한 번에 소화할 수 있는 K 타일 수(max_block_elems)와 Q8_0 블록 크기(block_granularity)를 결합해 실제 한 반복에서 처리할 K 크기를 결정
-    GGML_ASSERT(args->block_size_k > 0);
+    orca::ggml::ggml_gemmini_prepare_group_meta(*args);
+    const size_t group_size_k = args->effective_group_size_k > 0
+                                  ? args->effective_group_size_k
+                                  : std::max<size_t>(1, args->block_size_k);
+    const size_t weight_block_k = args->block_size_k > 0
+                                      ? static_cast<size_t>(args->block_size_k)
+                                      : static_cast<size_t>(QK8_0);
+    const size_t group_size_aligned = args->effective_group_size_aligned > 0
+                                          ? args->effective_group_size_aligned
+                                          : ((group_size_k + DIM - 1) / DIM) * DIM;
+    const size_t group_tile_cap = std::max<size_t>(1, group_size_aligned / DIM);
+    if (args->group_scope != GGML_GEMMINI_GROUP_TILE)
+    {
+      tile_K = std::min(tile_K, group_tile_cap);
+    }
     const size_t max_block_elems = tile_K * DIM;
 
-    // 가중치 스케일 테이블은 (blocks_K x blocks_J) 크기. 범위 체크에 사용.
-    const size_t total_weight_scale_elems = args->blocks_K * args->blocks_J;
-    const size_t total_act_scale_elems = args->A_scale_rows * args->A_scale_cols;
+    static thread_local std::vector<elem_t> a_stage;
+    static thread_local std::vector<elem_t> b_stage;
 
     size_t k_offset = 0;
     bool first_block = true;
@@ -1712,52 +1730,142 @@ namespace aisa
 
     while (k_offset < dim_K)
     {
-      const size_t remaining_k = dim_K - k_offset;      // 아직 처리되지 않은 K 길이
-      const size_t blk = k_offset / args->block_size_k; // 현재 위치가 속한 Q8_0 블록
-      const size_t off_in_blk = k_offset % args->block_size_k;
-      const size_t to_boundary = args->block_size_k - off_in_blk; // 해당 블록 경계까지 남은 길이
-      const size_t block_K = std::min({remaining_k, max_block_elems, to_boundary});
-      const size_t block_tiles = (block_K + DIM - 1) / DIM;
+      const size_t remaining_k = dim_K - k_offset;
+      size_t logical_block_K = std::min(remaining_k, max_block_elems);
+      const size_t off_in_group = k_offset % group_size_k;
+      const size_t to_group_boundary = group_size_k - off_in_group;
+      const size_t off_in_weight_block = k_offset % weight_block_k;
+      const size_t to_weight_boundary = weight_block_k - off_in_weight_block;
+
+      if (args->group_scope == GGML_GEMMINI_GROUP_TENSOR)
+      {
+        // Tensor activation scale is global, but weight scale is Q8_0-block.
+        logical_block_K = std::min(logical_block_K, to_weight_boundary);
+      }
+      else if (args->group_scope == GGML_GEMMINI_GROUP_BLOCK)
+      {
+        // Block mode must follow both activation-group and weight-block boundaries.
+        logical_block_K = std::min(logical_block_K, std::min(to_group_boundary, to_weight_boundary));
+      }
+      else if (args->group_scope != GGML_GEMMINI_GROUP_TILE && group_size_k < max_block_elems)
+      {
+        // Fallback for future scopes: only split when group is smaller than tile.
+        logical_block_K = std::min(logical_block_K, to_group_boundary);
+      }
+      const size_t aligned_block_K = ((logical_block_K + DIM - 1) / DIM) * DIM;
+      const size_t block_tiles = std::max<size_t>(1, aligned_block_K / DIM);
       const size_t block_tile_K = std::max<size_t>(1, std::min(tile_K, block_tiles));
 
       // orca_log_debug(layer, "[k-block] idx=%zu k_off=%zu block_K=%zu block_tile_K=%zu",
-      //                k_block_count, k_offset, block_K, block_tile_K);
+      //                k_block_count, k_offset, logical_block_K, block_tile_K);
 
-      processed_k += block_K;
+      processed_k += logical_block_K;
       ++k_block_count;
 
       // 새 누적 시작
       std::fill(c_acc32.begin(), c_acc32.end(), 0);
 
-      // 포인터 슬라이스 및 bias(첫 반복만)
-      const elem_t *A_block = args->A + k_offset;
-      const elem_t *B_block = args->B + k_offset * args->sB;
+      const bool needs_k_padding = aligned_block_K != logical_block_K;
+      const elem_t *A_block = nullptr;
+      const elem_t *B_block = nullptr;
+      size_t block_stride_A = args->sA;
+      size_t block_stride_B = args->sB;
+      size_t gemmini_block_K = logical_block_K;
+
+      if (needs_k_padding)
+      {
+        block_stride_A = args->transpose_A ? dim_I : aligned_block_K;
+        const size_t a_rows = args->transpose_A ? aligned_block_K : dim_I;
+        a_stage.assign(a_rows * block_stride_A, 0);
+
+        if (!args->transpose_A)
+        {
+          for (size_t i = 0; i < dim_I; ++i)
+          {
+            for (size_t kk = 0; kk < logical_block_K; ++kk)
+            {
+              a_stage[i * block_stride_A + kk] = args->A[i * args->sA + (k_offset + kk)];
+            }
+          }
+        }
+        else
+        {
+          for (size_t kk = 0; kk < logical_block_K; ++kk)
+          {
+            for (size_t i = 0; i < dim_I; ++i)
+            {
+              a_stage[kk * block_stride_A + i] = args->A[(k_offset + kk) * args->sA + i];
+            }
+          }
+        }
+
+        if (!args->transpose_B)
+        {
+          block_stride_B = dim_J;
+          b_stage.assign(aligned_block_K * block_stride_B, 0);
+          for (size_t kk = 0; kk < logical_block_K; ++kk)
+          {
+            for (size_t j = 0; j < dim_J; ++j)
+            {
+              b_stage[kk * block_stride_B + j] = args->B[(k_offset + kk) * args->sB + j];
+            }
+          }
+        }
+        else
+        {
+          block_stride_B = aligned_block_K;
+          b_stage.assign(dim_J * block_stride_B, 0);
+          for (size_t j = 0; j < dim_J; ++j)
+          {
+            for (size_t kk = 0; kk < logical_block_K; ++kk)
+            {
+              b_stage[j * block_stride_B + kk] = args->B[j * args->sB + (k_offset + kk)];
+            }
+          }
+        }
+
+        A_block = a_stage.data();
+        B_block = b_stage.data();
+        gemmini_block_K = aligned_block_K;
+      }
+      else
+      {
+        A_block = args->A + k_offset;
+        // JxK row-major (transpose_B=true): advance by column offset (k_offset).
+        // KxJ row-major (transpose_B=false): advance by row offset (k_offset * sB).
+        B_block = args->transpose_B
+                      ? (args->B + k_offset)
+                      : (args->B + k_offset * args->sB);
+      }
 
       const void *D_block = first_block ? args->D : nullptr;
+      args->gemmini_call_k_logical = logical_block_K;
+      args->gemmini_call_k_aligned = gemmini_block_K;
+      args->gemmini_call_tile_k_elems = block_tile_K * DIM;
 
       uint64_t end = orca::cycle::read();
-      orca_log_cycle(layer, "[tiled_matmul_auto_fp32] cpu.Setting tile dividing by block-size", start, end);
+      orca_log_cycle(layer, "[tiled_matmul_auto_fp32] cpu.Setting tile dividing by group-size", start, end);
 
       start = orca::cycle::read();
       // auto tiling으로 선정된 K 타일을 block에 매칭하여 block_tile_K를 사용해 호출
       if (cpu_fallback)
       {
-        tiled_matmul_int32(dim_I, dim_J, block_K,
+        tiled_matmul_int32(dim_I, dim_J, gemmini_block_K,
                            A_block, B_block, D_block, acc_ptr,
-                           args->sA, args->sB, args->sD, dim_J,
+                           block_stride_A, block_stride_B, args->sD, dim_J,
                            1.0f, 1.0f, args->scale_D,
                            act, args->scale, args->bert_scale, args->repeating_bias,
                            tile_I, tile_J, block_tile_K,
-                           args->transpose_A, /*transpose_B=*/false,
+                           args->transpose_A, args->transpose_B,
                            true, args->low_D,
                            args->weightA,
                            tiled_matmul_type);
       }
       else
       {
-        tiled_matmul(dim_I, dim_J, block_K,
+        tiled_matmul(dim_I, dim_J, gemmini_block_K,
                      A_block, B_block, D_block, acc_ptr,
-                     args->sA, args->sB, args->sD, dim_J,
+                     block_stride_A, block_stride_B, args->sD, dim_J,
                      1.0f, 1.0f, args->scale_D,
                      act, args->scale, args->bert_scale, args->repeating_bias,
                      tile_I, tile_J, block_tile_K,
@@ -1773,111 +1881,23 @@ namespace aisa
       // Gemmini의 int32(acc_t) 결과를 float로 dequantize
       if (f_out != nullptr)
       {
-        const size_t k_off = k_offset; // 이번 블록의 K 시작 오프셋
-        const bool used_bias = (D_block != nullptr);
         GGML_ASSERT(act == NO_ACTIVATION);
-
-        double diff_abs_sum = 0.0, diff_sq_sum = 0.0, diff_max = 0.0;
-        size_t bad_cnt = 0;
-        const double abs_tol = 1e-6;
-        const double rel_tol = 1e-2; // 1% 상대 허용
-
-        const elem_t *A_base = args->A + k_off;
-        const elem_t *B_base = args->B + k_off * args->sB;
-
-        // orca_log_debug(layer, "[deq.block] blk=%zu k_off=%zu K=%zu scale_A=%.6f act=%d bias=%d D_scale=%.6f",
-        //                blk, k_off, block_K, args->scale_A, act, (int)used_bias, (double)args->scale_D);
-
-        for (size_t i = 0; i < dim_I; ++i)
-        {
-          const acc_t *row_acc32 = acc_ptr32 + i * dim_J;
-          float *row_out = f_out + i * stride_f_out;
-
-          for (size_t j = 0; j < dim_J; ++j)
-          {
-            float scale_a = args->scale_A;
-            // per-block weight scale 조회
-            float scale_w = 1.0f;
-            size_t weight_scale_idx = 0;
-            if (args->B_scales && blk < args->blocks_K)
-            {
-              weight_scale_idx = blk * args->blocks_J + j;
-              if (weight_scale_idx < total_weight_scale_elems)
-                scale_w = args->B_scales[weight_scale_idx];
-            }
-
-#if ACTIVATION_BLOCK_SCALE
-            size_t act_scale_idx = 0;
-            if (args->A_scales && i < args->A_scale_rows && blk < args->A_scale_cols)
-            {
-              act_scale_idx = i * args->A_scale_cols + blk;
-              if (act_scale_idx < total_act_scale_elems)
-                scale_a = args->A_scales[act_scale_idx];
-            }
-#endif
-
-            const float scale_out = scale_a * scale_w;
-            const acc_t acc32 = row_acc32[j];
-            const float contrib = static_cast<float>(acc32) * scale_out;
-
-            const float post = contrib;
-            row_out[j * col_stride_f_out] += post;
-
-#if GEMMINI_VERIFY_DEQ
-            // 참조 재적분(ref): 동일 block_K 범위만 qA*qB*scale_A*scale_w 합산
-            float ref = 0.0f;
-            for (size_t kk = 0; kk < block_K; ++kk)
-            {
-              const size_t a_off = !args->transpose_A ? (i * args->sA + kk) : (kk * args->sA + i);
-              const size_t b_off = kk * args->sB + j;
-
-              const elem_t a_q = *(A_base + a_off);
-              const elem_t b_q = *(B_base + b_off);
-              ref += static_cast<float>(a_q) * scale_a * static_cast<float>(b_q) * scale_w;
-            }
-
-            const double diff = (double)ref - (double)contrib;
-            const double adiff = std::fabs(diff);
-            diff_abs_sum += adiff;
-            diff_sq_sum += diff * diff;
-            if (adiff > diff_max)
-              diff_max = adiff;
-            const double tol = std::max(abs_tol, rel_tol * std::fabs(ref));
-            if (adiff > tol)
-              ++bad_cnt;
-
-            if (i < 1 && j < 4)
-            {
-              orca_log_debug(layer, "[deq] blk=%zu j=%zu w_idx=%zu scale_w=%.6f", blk, j, weight_scale_idx, scale_w);
-#if ACTIVATION_BLOCK_SCALE
-              orca_log_debug(layer, "[deq] blk=%zu j=%zu act_idx=%zu scale_a=%.6f", blk, j, act_scale_idx, scale_a);
-#endif
-              orca_log_debug(layer, "[deq] row=%zu col=%zu acc=%d scale_out=%.6f contrib=%.6f post=%.6f",
-                             i, j, (int)acc32, scale_out, contrib, post);
-
-              orca_log_debug(layer, "[deq] verify row=%zu col=%zu blk=%zu contrib=%.6f ref=%.6f diff=%.3e",
-                             i, j, blk, contrib, ref, diff);
-            }
-#endif
-          }
-        }
-        const double denom = (double)dim_I * (double)dim_J;
-        const double mae = diff_abs_sum / denom;
-        const double rmse = std::sqrt(diff_sq_sum / denom);
-
-        orca_log_debug(layer, "[deq.sum] blk=%zu k_off=%zu K=%zu rows=%zu cols=%zu mae=%.3e rmse=%.3e max|diff|=%.3e bad>(abs=%.1e,rel=%.1e)=%zu",
-                       blk, k_off, block_K, dim_I, dim_J, mae, rmse, diff_max, abs_tol, rel_tol, bad_cnt);
-                      }
+        orca::ggml::ggml_gemmini_dequant_acc_block(*args,
+                                                   k_offset,
+                                                   logical_block_K,
+                                                   reinterpret_cast<const int32_t *>(acc_ptr32),
+                                                   dim_J);
+      }
       end = orca::cycle::read();
       orca_log_cycle(layer, "[tiled_matmul_auto_fp32] cpu.Dequantize output to fp32", start, end);
 
-      k_offset += block_K;
+      k_offset += logical_block_K;
       first_block = false;
     }
 
     GGML_ASSERT(processed_k == dim_K);
 #if GEMMINI_KBLOCK_DEBUG
-    orca_log_debug(layer, "[k-block.summary] blocks=%zu processed_K=%zu dim_K=%zu",
+    orca_log_debug_layer(layer, "[k-block.summary] blocks=%zu processed_K=%zu dim_K=%zu",
                    k_block_count, processed_k, dim_K);
 #endif
 
