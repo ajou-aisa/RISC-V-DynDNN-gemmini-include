@@ -1678,8 +1678,8 @@ namespace aisa
     }
 
     // tile size 디버깅
-    // orca_log_debug(layer, "[tiled_matmul_auto_fp32] dim=(%zu,%zu,%zu) tiles=(%zu,%zu,%zu)",
-    //                dim_I, dim_J, dim_K, tile_I, tile_J, tile_K);
+    orca_log_debug_layer(layer, "[tiled_matmul_auto_fp32] dim=(%zu,%zu,%zu) tiles=(%zu,%zu,%zu)",
+                   dim_I, dim_J, dim_K, tile_I, tile_J, tile_K);
 
     const bool cpu_fallback = tiled_matmul_type == CPU;
 
@@ -1897,7 +1897,7 @@ namespace aisa
 
     GGML_ASSERT(processed_k == dim_K);
 #if GEMMINI_KBLOCK_DEBUG
-    orca_log_debug(layer, "[k-block.summary] blocks=%zu processed_K=%zu dim_K=%zu",
+    orca_log_debug_layer(layer, "[k-block.summary] blocks=%zu processed_K=%zu dim_K=%zu",
                    k_block_count, processed_k, dim_K);
 #endif
 
