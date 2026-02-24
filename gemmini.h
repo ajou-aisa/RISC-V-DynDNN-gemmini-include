@@ -1622,8 +1622,6 @@ namespace aisa
 {
   static void tiled_matmul_auto_fp32(struct ggml_gemmini_args_t *args)
   {
-    orca_log_debug_set_output_path("log/debug-log.jsonl");
-    orca_log_cycle_set_output_path("log/cycle-log.jsonl");
     const char *layer = args->layer_name ? args->layer_name : "";
 
     // tile size와 block size 매칭을 통해, tiled별 연산 결과를 dequantize해서 llama.cpp의 output으로 전달
