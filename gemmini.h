@@ -86,6 +86,12 @@ namespace orca::ggml {
 #ifndef GEMMINI_KBLOCK_DEBUG
 #define GEMMINI_KBLOCK_DEBUG 0
 #endif
+#ifndef GEMMINI_WS_DEBUG
+#define GEMMINI_WS_DEBUG 0
+#endif
+#ifndef GEMMINI_DISABLE_WS_REUSE
+#define GEMMINI_DISABLE_WS_REUSE 0
+#endif
 #ifndef ACTIVATION_BLOCK_SCALE
 #define ACTIVATION_BLOCK_SCALE 1
 #endif
@@ -834,6 +840,32 @@ static void tiled_matmul_outer(size_t dim_I, size_t dim_J, size_t dim_K,
   int b_spad_id = 0;
   bool b_reuse = (J0 * K0 <= 2) && (dataflow == WEIGHT_STATIONARY);
   bool a_reuse = (I0 * K0 <= 2) && (dataflow == WEIGHT_STATIONARY);
+#if GEMMINI_DISABLE_WS_REUSE
+  if (dataflow == WEIGHT_STATIONARY) {
+    a_reuse = false;
+    b_reuse = false;
+  }
+#endif
+
+#if GEMMINI_WS_DEBUG
+  if (dataflow == WEIGHT_STATIONARY) {
+    orca_log_debug(
+        "[ws.outer] dim=(%zu,%zu,%zu) tile=(%zu,%zu,%zu) iter=(%zu,%zu,%zu) pad=(%zu,%zu,%zu) "
+        "stride=(%zu,%zu,%zu,%zu) reuse=(A:%d,B:%d) flags=(aT:%d,bT:%d,fullC:%d,lowD:%d,noBias:%d,repeatBias:%d,act:%d)",
+        dim_I, dim_J, dim_K,
+        tile_I, tile_J, tile_K,
+        I0, J0, K0,
+        padding_I, padding_J, padding_K,
+        stride_A, stride_B, stride_D, stride_C,
+        a_reuse ? 1 : 0, b_reuse ? 1 : 0,
+        a_transpose ? 1 : 0, b_transpose ? 1 : 0,
+        full_C ? 1 : 0, low_D ? 1 : 0,
+        no_bias ? 1 : 0, repeating_bias ? 1 : 0,
+        act);
+  }
+#endif
+
+  size_t ws_call_idx = 0;
 
   for (size_t i0 = 0; i0 < I0; i0++)
     for (size_t j0 = 0; j0 < J0; j0++)
@@ -870,6 +902,20 @@ static void tiled_matmul_outer(size_t dim_I, size_t dim_J, size_t dim_K,
 
         if(a_reuse && j0 >= 1) a = NULL;
         if(b_reuse && i0 >= 1) b = NULL;
+
+#if GEMMINI_WS_DEBUG
+        if (dataflow == WEIGHT_STATIONARY) {
+          orca_log_debug(
+              "[ws.inner.begin] idx=%zu i0=%zu j0=%zu k0=%zu IJK=(%zu,%zu,%zu) pad=(%zu,%zu,%zu) "
+              "ptr=(A:%p,B:%p,pre:%p,out:%p) spad=(%d,%d) reuse=(A:%d,B:%d)",
+              ws_call_idx, i0, j0, k0,
+              I, J, K,
+              pad_I, pad_J, pad_K,
+              (const void *)a, (const void *)b, pre, out,
+              a_spad_id, b_spad_id,
+              a_reuse ? 1 : 0, b_reuse ? 1 : 0);
+        }
+#endif
         //printf("a_reuse: %d, b_reuse: %d, a_spad_id: %d, b_spad_id: %d, a: %llu, b: %llu \n", a_reuse, b_reuse, a_spad_id, b_spad_id, a, b);
         (*inner)(a, b, pre, out,
             A_scale_factor, B_scale_factor, D_scale_factor,
@@ -880,6 +926,13 @@ static void tiled_matmul_outer(size_t dim_I, size_t dim_J, size_t dim_K,
             full_C, low_D,
             no_bias, repeating_bias,
             act, a_spad_id, b_spad_id);
+
+#if GEMMINI_WS_DEBUG
+        if (dataflow == WEIGHT_STATIONARY) {
+          orca_log_debug("[ws.inner.end] idx=%zu i0=%zu j0=%zu k0=%zu", ws_call_idx, i0, j0, k0);
+        }
+#endif
+        ++ws_call_idx;
       }
 
   gemmini_fence();
@@ -1569,8 +1622,6 @@ namespace aisa
 {
   static void tiled_matmul_auto_fp32(struct ggml_gemmini_args_t *args)
   {
-    orca_log_debug_set_output_path("log/debug-log.jsonl");
-    orca_log_cycle_set_output_path("log/cycle-log.jsonl");
     const char *layer = args->layer_name ? args->layer_name : "";
 
     // tile size와 block size 매칭을 통해, tiled별 연산 결과를 dequantize해서 llama.cpp의 output으로 전달
@@ -1843,6 +1894,18 @@ namespace aisa
       args->gemmini_call_k_aligned = gemmini_block_K;
       args->gemmini_call_tile_k_elems = block_tile_K * DIM;
 
+#if GEMMINI_WS_DEBUG
+      orca_log_debug_layer(
+          layer,
+          "[k-block.call] idx=%zu k_off=%zu logical=%zu aligned=%zu tileK=%zu first=%d "
+          "ptr=(A:%p,B:%p,D:%p) stride=(A:%zu,B:%zu) type=%d",
+          k_block_count - 1, k_offset, logical_block_K, gemmini_block_K, block_tile_K,
+          first_block ? 1 : 0,
+          (const void *)A_block, (const void *)B_block, D_block,
+          block_stride_A, block_stride_B,
+          static_cast<int>(tiled_matmul_type));
+#endif
+
       uint64_t end = orca::cycle::read();
       orca_log_cycle(layer, "[tiled_matmul_auto_fp32] cpu.Setting tile dividing by group-size", start, end);
 
@@ -1876,6 +1939,10 @@ namespace aisa
       }
       end = orca::cycle::read();
       orca_log_cycle(layer, "[tiled_matmul_auto_fp32] npu.Gemmini HW tiled_matmul", start, end);
+
+#if GEMMINI_WS_DEBUG
+      orca_log_debug_layer(layer, "[k-block.done] idx=%zu k_off=%zu", k_block_count - 1, k_offset);
+#endif
 
       start = orca::cycle::read();
       // Gemmini의 int32(acc_t) 결과를 float로 dequantize
