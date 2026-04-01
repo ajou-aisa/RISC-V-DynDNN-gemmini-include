@@ -1622,7 +1622,7 @@ namespace aisa
 {
   static void tiled_matmul_auto_fp32(struct ggml_gemmini_args_t *args)
   {
-    const char *layer = args->layer_name ? args->layer_name : "";
+    const char *layer = orca::types::to_string(args->layer_type);
 
     // tile size와 block size 매칭을 통해, tiled별 연산 결과를 dequantize해서 llama.cpp의 output으로 전달
     uint64_t start = orca::cycle::read();
