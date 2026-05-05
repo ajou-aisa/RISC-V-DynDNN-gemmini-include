@@ -8,10 +8,13 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <cmath>
 #include <math.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <algorithm>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "gemmini_params.h"
@@ -38,6 +41,19 @@ namespace orca::ggml {
                                       size_t block_k,
                                       const int32_t *acc32,
                                       size_t acc_stride);
+  void dequant_acc_block_q80_r(const ggml_gemmini_args_t &args,
+                               size_t k_offset,
+                               size_t block_k,
+                               const int32_t *acc32,
+                               size_t acc_stride);
+
+  namespace quants {
+    void ggml_gemmini_quantize_activation_tile(const ggml_tensor *src,
+                                               ggml_gemmini_args_t &args,
+                                               int8_t *dst,
+                                               int tile_row,
+                                               int tile_col);
+  }
 }
 
 #define k_CONFIG 0
@@ -1618,13 +1634,56 @@ static size_t tiled_matmul_total_acc_rows(size_t I, size_t J) {
   return (I * J) * DIM;
 }
 
-namespace aisa
-{
-  static void tiled_matmul_auto_fp32(struct ggml_gemmini_args_t *args)
-  {
+namespace orca {
+  namespace gemmini_detail {
+    template <typename Args, typename = void>
+    struct has_activation_src : std::false_type
+    {
+    };
+
+    template <typename Args>
+    struct has_activation_src<Args, std::void_t<decltype(std::declval<Args &>().activation_src)>> : std::true_type
+    {
+    };
+
+    template <typename Args>
+    static bool quantize_activation_tile_if_available(Args &args,
+                                                      int8_t *dst,
+                                                      int tile_row,
+                                                      int tile_col)
+    {
+      if constexpr (has_activation_src<Args>::value)
+      {
+        if (args.activation_src == nullptr)
+          return false;
+
+        orca::ggml::quants::ggml_gemmini_quantize_activation_tile(
+            args.activation_src, args, dst, tile_row, tile_col);
+        return true;
+      }
+      else
+      {
+        (void)args;
+        (void)dst;
+        (void)tile_row;
+        (void)tile_col;
+        return false;
+      }
+    }
+
+    static inline float apply_activation_exponent(float value, int16_t e_t, int16_t m)
+    {
+      if (e_t == std::numeric_limits<int16_t>::min())
+        return value;
+
+      return std::ldexp(value, static_cast<int>(e_t) - static_cast<int>(m));
+    }
+  }
+
+  static void gemmini_set_tile(struct ggml_gemmini_args_t *args){
     const char *layer = orca::types::to_string(args->layer_type);
 
-    // tile size와 block size 매칭을 통해, tiled별 연산 결과를 dequantize해서 llama.cpp의 output으로 전달
+    // tile size 계산
     uint64_t start = orca::cycle::read();
     if (args == NULL)
       return;
@@ -1632,11 +1691,10 @@ namespace aisa
     const size_t dim_I = args->I;
     const size_t dim_J = args->J;
     const size_t dim_K = args->K;
-
     const enum tiled_matmul_type_t tiled_matmul_type = args->tiled_matmul_type;
     const int act = args->act;
 
-    // gemmini 기본 auto tiling
+        // gemmini 기본 auto tiling
 #define partition_rows (BANK_NUM * BANK_ROWS / 2)
 #define mats_in_partition (partition_rows / DIM)
 #define mats_in_acc (ACC_ROWS / DIM)
@@ -1728,9 +1786,347 @@ namespace aisa
         break;
     }
 
+    args->tile_I = tile_I;
+    args->tile_J = tile_J;
+    args->tile_K = tile_K;
+
     // tile size 디버깅
-    orca_log_debug_layer(layer, "[tiled_matmul_auto_fp32] dim=(%zu,%zu,%zu) tiles=(%zu,%zu,%zu)",
+    orca_log_debug_layer(layer, "[set_tile] dim=(%zu,%zu,%zu) tiles=(%zu,%zu,%zu)",
                    dim_I, dim_J, dim_K, tile_I, tile_J, tile_K);
+  }
+
+  static void tiled_block_matmul_auto(struct ggml_gemmini_args_t *args) {
+    if (args == NULL)
+      return;
+
+    const char *layer = orca::types::to_string(args->layer_type);
+    // tile size와 block size 매칭을 통해, tiled별 연산 결과를 dequantize해서 llama.cpp의 output으로 전달
+    uint64_t start = orca::cycle::read();
+
+    if (args->tiled_matmul_type != CPU)
+    {
+      orca_log_debug_layer(layer, "[tiled_block_matmul_auto] only CPU mode is implemented");
+      return;
+    }
+
+    if (args->A == nullptr || args->B == nullptr || args->f_out == nullptr ||
+        args->s_bi == nullptr || args->s_rf == nullptr || args->R == nullptr)
+      return;
+
+    if (args->tile_I == 0 || args->tile_J == 0 || args->tile_K == 0)
+      gemmini_set_tile(args);
+
+    const size_t dim_I = args->I;
+    const size_t dim_J = args->J;
+    const size_t dim_K = args->K;
+    if (dim_I == 0 || dim_J == 0 || dim_K == 0 || args->blocks_per_row == 0)
+      return;
+
+    GGML_ASSERT(args->act == NO_ACTIVATION);
+
+    const size_t block_size_k = args->block_size_k > 0
+                                    ? static_cast<size_t>(args->block_size_k)
+                                    : static_cast<size_t>(QK8_0);
+    if (block_size_k == 0)
+      return;
+
+    const size_t tile_I = std::max<size_t>(1, args->tile_I) * static_cast<size_t>(DIM);
+    const size_t tile_J = std::max<size_t>(1, args->tile_J) * static_cast<size_t>(DIM);
+    const size_t tile_K = std::max<size_t>(1, args->tile_K) * static_cast<size_t>(DIM);
+    const size_t out_row_stride = args->stride_f_out ? args->stride_f_out : dim_J;
+    const size_t out_col_stride = args->col_stride_f_out ? args->col_stride_f_out : 1;
+    const size_t scale_rows = args->blocks_J > 0 ? args->blocks_J : dim_J;
+
+    const size_t num_i_tiles = (dim_I + tile_I - 1) / tile_I;
+    const size_t num_j_tiles = (dim_J + tile_J - 1) / tile_J;
+    const size_t num_k_tiles = (dim_K + tile_K - 1) / tile_K;
+
+    orca_log_debug_layer(layer,
+        "[tiled_block_matmul_auto] dim=(I=%zu,J=%zu,K=%zu) tile_size: A=(I=%zu x K=%zu) B=(J=%zu x K=%zu) | num_tiles: I=%zu J=%zu K=%zu blocks_per_row=%zu",
+        dim_I, dim_J, dim_K, tile_I, tile_K, tile_J, tile_K, num_i_tiles, num_j_tiles, num_k_tiles, args->blocks_per_row);
+
+    for (size_t i = 0; i < dim_I; ++i)
+    {
+      float *row_out = args->f_out + i * out_row_stride;
+      for (size_t j = 0; j < dim_J; ++j)
+        row_out[j * out_col_stride] = 0.0f;
+    }
+
+    static thread_local std::vector<elem_t> a_tile;
+    static thread_local std::vector<int64_t> acc32;
+
+    const elem_t *A = args->A;
+    const elem_t *B = args->B;
+    const size_t stride_A = args->sA ? args->sA : dim_K;
+    const size_t row_stride_B = args->sB;
+    if (row_stride_B == 0)
+      return;
+    const size_t q80_r_block_stride = block_size_k + sizeof(uint8_t);
+
+    for (size_t tile_i = 0; tile_i < dim_I; tile_i += tile_I)
+    {
+      const size_t tile_i_actual = std::min(tile_I, dim_I - tile_i);
+      const int tile_row_idx = static_cast<int>(tile_i / tile_I);
+
+      for (size_t tile_j = 0; tile_j < dim_J; tile_j += tile_J)
+      {
+        const size_t tile_j_actual = std::min(tile_J, dim_J - tile_j);
+
+        for (size_t k_tile = 0; k_tile < dim_K; k_tile += tile_K)
+        {
+          const size_t tile_k_actual = std::min(tile_K, dim_K - k_tile);
+          const size_t tile_k_padded = ((tile_k_actual + block_size_k - 1) / block_size_k) * block_size_k;
+          const int tile_col_idx = static_cast<int>(k_tile / tile_K);
+
+          acc32.assign(tile_i_actual * tile_j_actual, 0);
+          a_tile.assign(tile_i_actual * tile_k_padded, 0);
+
+          const size_t saved_tile_I = args->tile_I;
+          const size_t saved_tile_K = args->tile_K;
+          args->tile_I = tile_I;
+          args->tile_K = tile_K;
+          const bool quantized_by_adapter = gemmini_detail::quantize_activation_tile_if_available(
+              *args, reinterpret_cast<int8_t *>(a_tile.data()), tile_row_idx, tile_col_idx);
+          args->tile_I = saved_tile_I;
+          args->tile_K = saved_tile_K;
+
+          if (!quantized_by_adapter)
+          {
+            for (size_t i = 0; i < tile_i_actual; ++i)
+            {
+              for (size_t kk = 0; kk < tile_k_actual; ++kk)
+              {
+                const size_t src_i = tile_i + i;
+                const size_t src_k = k_tile + kk;
+                a_tile[i * tile_k_padded + kk] = args->transpose_A
+                                                    ? A[src_k * stride_A + src_i]
+                                                    : A[src_i * stride_A + src_k];
+              }
+            }
+          }
+
+          for (size_t k_block = 0; k_block < tile_k_actual;)
+          {
+            const size_t global_k = k_tile + k_block;
+            const size_t k_in_weight_block = global_k % block_size_k;
+            const size_t block_k_actual = std::min(block_size_k - k_in_weight_block, tile_k_actual - k_block);
+            const size_t weight_blk = global_k / block_size_k;
+            if (weight_blk >= args->blocks_per_row)
+            {
+              k_block += block_k_actual;
+              continue;
+            }
+
+            for (size_t i = 0; i < tile_i_actual; ++i)
+            {
+              const elem_t *a_row = a_tile.data() + i * tile_k_padded + k_block;
+              int64_t *acc_row = acc32.data() + i * tile_j_actual;
+
+              for (size_t j = 0; j < tile_j_actual; ++j)
+              {
+                const size_t global_j = tile_j + j;
+                if (global_j >= scale_rows)
+                  continue;
+
+                const elem_t *b_block = B + global_j * row_stride_B + weight_blk * q80_r_block_stride + k_in_weight_block;
+                int32_t block_dot = 0;
+                for (size_t kk = 0; kk < block_k_actual; ++kk)
+                  block_dot += static_cast<int32_t>(a_row[kk]) * static_cast<int32_t>(b_block[kk]);
+
+                const size_t scale_idx = global_j * args->blocks_per_row + weight_blk;
+                const uint64_t effective_code =
+                    static_cast<uint64_t>(static_cast<uint16_t>(args->s_bi[scale_idx])) +
+                    static_cast<uint64_t>(args->R[global_j]);
+                const int64_t acc_before = acc_row[j];
+                acc_row[j] += static_cast<int64_t>(block_dot) * static_cast<int64_t>(effective_code);
+
+                if (i == 0 && j == 0)
+                {
+                    orca_log_debug_layer(layer,
+                        "[tiled_block_matmul_auto] block-dequant i=%zu j=%zu k=%zu weight_blk=%zu "
+                        "dot=%d s_bi=%u R=%u effective=%llu acc_before=%ld acc_after=%ld",
+                        tile_i + i, global_j, k_tile + k_block, weight_blk,
+                        block_dot,
+                        static_cast<unsigned int>(args->s_bi[scale_idx]),
+                        static_cast<unsigned int>(args->R[global_j]),
+                        static_cast<unsigned long long>(effective_code),
+                        static_cast<long>(acc_before),
+                        static_cast<long>(acc_row[j]));
+                }
+              }
+            }
+
+            k_block += block_k_actual;
+          }
+
+          orca_log_debug_layer(layer,
+              "[tiled_block_matmul_auto] iter I=[%zu:%zu) J=[%zu:%zu) K=[%zu:%zu) K_pad=%zu blk=[%zu:%zu) pad=%zu e_t=%d m=%d q=%d",
+              tile_i, tile_i + tile_i_actual, tile_j, tile_j + tile_j_actual,
+              k_tile, k_tile + tile_k_actual, tile_k_padded,
+              k_tile / block_size_k, (k_tile + tile_k_actual + block_size_k - 1) / block_size_k,
+              tile_k_padded - tile_k_actual,
+              static_cast<int>(args->activation_e_t),
+              static_cast<int>(args->activation_m),
+              quantized_by_adapter ? 1 : 0);
+
+          for (size_t i = 0; i < tile_i_actual; ++i)
+          {
+            const size_t global_i = tile_i + i;
+            const int64_t *acc_row = acc32.data() + i * tile_j_actual;
+            float *row_out = args->f_out + global_i * out_row_stride;
+
+            for (size_t j = 0; j < tile_j_actual; ++j)
+            {
+              const size_t global_j = tile_j + j;
+              if (global_j >= scale_rows)
+                continue;
+
+              const float acc_fp = static_cast<float>(static_cast<double>(acc_row[j]) * static_cast<double>(args->s_rf[global_j]));
+              const float contrib = gemmini_detail::apply_activation_exponent(acc_fp, args->activation_e_t, args->activation_m);
+
+              if (i == 0 && j == 0)
+              {
+                  const double activation_exp = gemmini_detail::apply_activation_exponent(1.0f, args->activation_e_t, args->activation_m);
+                  orca_log_debug_layer(layer,
+                      "[tiled_block_matmul_auto] tile-dequant i=%zu j=%zu "
+                      "acc=%ld s_rf=%.9f acc*s_rf=%.6f exp=%.6f contrib=%.6f -> f_out+=%.6f",
+                      tile_i + i, global_j,
+                      static_cast<long>(acc_row[j]),
+                      static_cast<double>(args->s_rf[global_j]),
+                      static_cast<double>(acc_fp),
+                      activation_exp,
+                      static_cast<double>(contrib),
+                      static_cast<double>(row_out[global_j * out_col_stride] + contrib));
+              }
+
+              row_out[global_j * out_col_stride] += contrib;
+            }
+          }
+        }
+      }
+    }
+
+    uint64_t end = orca::cycle::read();
+    orca_log_cycle(layer, "[tiled_block_matmul_auto] cpu.Q8_0_R tiled matmul", start, end);
+  }
+}
+namespace aisa
+{
+  static void tiled_matmul_auto_fp32(struct ggml_gemmini_args_t *args)
+  {
+    const char *layer = orca::types::to_string(args->layer_type);
+
+    // tile size와 block size 매칭을 통해, tiled별 연산 결과를 dequantize해서 llama.cpp의 output으로 전달
+    uint64_t start = orca::cycle::read();
+    if (args == NULL)
+      return;
+
+    const size_t dim_I = args->I;
+    const size_t dim_J = args->J;
+    const size_t dim_K = args->K;
+
+    const enum tiled_matmul_type_t tiled_matmul_type = args->tiled_matmul_type;
+    const int act = args->act;
+
+    size_t tile_I = args->tile_I;
+    size_t tile_J = args->tile_J;
+    size_t tile_K = args->tile_K;
+
+//     // gemmini 기본 auto tiling
+// #define partition_rows (BANK_NUM * BANK_ROWS / 2)
+// #define mats_in_partition (partition_rows / DIM)
+// #define mats_in_acc (ACC_ROWS / DIM)
+// #define max_tile_i_j ((size_t)sqrt(mats_in_acc))
+// #define max_tile_k (mats_in_partition / max_tile_i_j)
+
+// #define partition_rows (BANK_NUM * BANK_ROWS / 2)
+// #define mats_in_partition (partition_rows / DIM)
+// #define mats_in_acc (ACC_ROWS / DIM)
+// #define max_tile_i_j ((size_t)sqrt(mats_in_acc))
+// #define max_tile_k (mats_in_partition / max_tile_i_j)
+
+//     // "db_" means "double-buffered"
+// #define db_partition_rows ((BANK_NUM * BANK_ROWS / 2) / 2)
+// #define db_mats_in_partition (db_partition_rows / DIM)
+// #define db_mats_in_acc ((ACC_ROWS / 2) / DIM)
+// #define db_max_tile_i_j ((size_t)sqrt(db_mats_in_acc))
+// #define db_max_tile_k (db_mats_in_partition / db_max_tile_i_j)
+
+//     // GEMMINI는 한 타일이 DIM(=16) 배수여야 하므로 논리 크기를 DIM에 맞춰 패딩
+//     const size_t dim_I_padded = (dim_I / DIM + (dim_I % DIM != 0)) * DIM;
+//     const size_t dim_J_padded = (dim_J / DIM + (dim_J % DIM != 0)) * DIM;
+//     const size_t dim_K_padded = (dim_K / DIM + (dim_K % DIM != 0)) * DIM;
+
+//     // WS 모드에서는 스크래치패드와 ACC를 두 세트로 나눠 번갈아 쓰기 때문에 최대 사용량이 절반으로 감소
+//     const bool double_buffered = tiled_matmul_type == WS;
+
+//     // auto tiler가 탐색할 최대 scratchpad/ACC 행 수를 미리 계산
+//     const size_t max_spad_rows = double_buffered ? BANK_NUM * BANK_ROWS / 2 : BANK_NUM * BANK_ROWS;
+//     const size_t max_acc_rows = double_buffered ? ACC_ROWS / 2 : ACC_ROWS;
+
+//     // tile_I/tile_J/tile_K는 DIM 단위 매트릭스 개수(행렬 블록 수)
+//     size_t tile_I, tile_J, tile_K;
+
+//     if (act == LAYERNORM || act == SOFTMAX)
+//     {
+//       // 레이어정규화·소프트맥스는 누산 버퍼 전체에 한 행이 상주해야 하므로 I=1, K=1로 강제
+//       tile_I = 1;
+//       tile_J = dim_J_padded / DIM;
+//       tile_K = 1;
+//     }
+//     else if (double_buffered)
+//     {
+//       // WS 모드: scratchpad/ACC 용량이 절반이므로 db_* 상수로 계산한 최대치와 실제 필요량 중 작은 값을 선택
+//       tile_I = dim_I_padded / DIM < db_max_tile_i_j ? dim_I_padded / DIM : db_max_tile_i_j;
+//       tile_J = dim_J_padded / DIM < db_max_tile_i_j ? dim_J_padded / DIM : db_max_tile_i_j;
+//       tile_K = dim_K_padded / DIM < db_max_tile_k ? dim_K_padded / DIM : db_max_tile_k;
+//     }
+//     else
+//     {
+//       // OS 모드: 전체 scratchpad/ACC를 쓸 수 있으니 기본 max_* 한도와 비교
+//       tile_I = dim_I_padded / DIM < max_tile_i_j ? dim_I_padded / DIM : max_tile_i_j;
+//       tile_J = dim_J_padded / DIM < max_tile_i_j ? dim_J_padded / DIM : max_tile_i_j;
+//       tile_K = dim_K_padded / DIM < max_tile_k ? dim_K_padded / DIM : max_tile_k;
+//     }
+
+//     // Fill scratchpad as much as possible
+//     while (true)
+//     {
+//       bool increased = false;
+
+//       // J 타일을 한 칸 늘렸을 때 scratchpad/ACC 제약을 넘지 않고 실제 행렬도 수용 가능하면 확장
+//       if (tiled_matmul_total_spad_rows(tile_I, tile_J + 1, tile_K) <= max_spad_rows &&
+//           tiled_matmul_total_acc_rows(tile_I, tile_J + 1) <= max_acc_rows &&
+//           (tile_J + 1) * DIM <= dim_J_padded)
+//       {
+//         tile_J++;
+//         increased = true;
+//       }
+
+//       // I 타일 확장: scratchpad에는 A, ACC에는 C가 늘어나므로 두 조건을 모두 만족해야 함
+//       if (tiled_matmul_total_spad_rows(tile_I + 1, tile_J, tile_K) <= max_spad_rows &&
+//           tiled_matmul_total_acc_rows(tile_I + 1, tile_J) <= max_acc_rows &&
+//           (tile_I + 1) * DIM <= dim_I_padded)
+//       {
+//         tile_I++;
+//         increased = true;
+//       }
+
+//       // K 타일 확장: scratchpad만 추가로 필요하므로 accumulator 조건은 확인하지 않음
+//       if (tiled_matmul_total_spad_rows(tile_I, tile_J, tile_K + 1) <= max_spad_rows &&
+//           (tile_K + 1) * DIM <= dim_K_padded)
+//       {
+//         tile_K++;
+//         increased = true;
+//       }
+
+//       if (!increased)
+//         break;
+//     }
+
+//     // tile size 디버깅
+//     orca_log_debug_layer(layer, "[tiled_matmul_auto_fp32] dim=(%zu,%zu,%zu) tiles=(%zu,%zu,%zu)",
+//                    dim_I, dim_J, dim_K, tile_I, tile_J, tile_K);
 
     const bool cpu_fallback = tiled_matmul_type == CPU;
 
