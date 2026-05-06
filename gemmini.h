@@ -1810,7 +1810,7 @@ namespace orca {
     }
 
     if (args->A == nullptr || args->B == nullptr || args->f_out == nullptr ||
-        args->s_bi == nullptr || args->s_rf == nullptr || args->R == nullptr)
+        args->c_b == nullptr || args->s_rf == nullptr || args->R == nullptr)
       return;
 
     if (args->tile_I == 0 || args->tile_J == 0 || args->tile_K == 0)
@@ -1861,7 +1861,6 @@ namespace orca {
     const size_t row_stride_B = args->sB;
     if (row_stride_B == 0)
       return;
-    const size_t q80_r_block_stride = block_size_k + sizeof(uint8_t);
 
     for (size_t tile_i = 0; tile_i < dim_I; tile_i += tile_I)
     {
@@ -1928,28 +1927,28 @@ namespace orca {
                 if (global_j >= scale_rows)
                   continue;
 
-                const elem_t *b_block = B + global_j * row_stride_B + weight_blk * q80_r_block_stride + k_in_weight_block;
+                const elem_t *b_block = B + global_j * dim_K + weight_blk * block_size_k + k_in_weight_block;
                 int32_t block_dot = 0;
                 for (size_t kk = 0; kk < block_k_actual; ++kk)
                   block_dot += static_cast<int32_t>(a_row[kk]) * static_cast<int32_t>(b_block[kk]);
 
                 const size_t scale_idx = global_j * args->blocks_per_row + weight_blk;
-                const uint64_t effective_code =
-                    static_cast<uint64_t>(static_cast<uint16_t>(args->s_bi[scale_idx])) +
+                const uint64_t c_eff =
+                    static_cast<uint64_t>(static_cast<uint16_t>(args->c_b[scale_idx])) +
                     static_cast<uint64_t>(args->R[global_j]);
                 const int64_t acc_before = acc_row[j];
-                acc_row[j] += static_cast<int64_t>(block_dot) * static_cast<int64_t>(effective_code);
+                acc_row[j] += static_cast<int64_t>(block_dot) * static_cast<int64_t>(c_eff);
 
                 if (i == 0 && j == 0)
                 {
                     orca_log_debug_layer(layer,
                         "[tiled_block_matmul_auto] block-dequant i=%zu j=%zu k=%zu weight_blk=%zu "
-                        "dot=%d s_bi=%u R=%u effective=%llu acc_before=%ld acc_after=%ld",
+                        "dot=%d c_b=%u R=%u c_eff=%llu acc_before=%ld acc_after=%ld",
                         tile_i + i, global_j, k_tile + k_block, weight_blk,
                         block_dot,
-                        static_cast<unsigned int>(args->s_bi[scale_idx]),
+                        static_cast<unsigned int>(args->c_b[scale_idx]),
                         static_cast<unsigned int>(args->R[global_j]),
-                        static_cast<unsigned long long>(effective_code),
+                        static_cast<unsigned long long>(c_eff),
                         static_cast<long>(acc_before),
                         static_cast<long>(acc_row[j]));
                 }
