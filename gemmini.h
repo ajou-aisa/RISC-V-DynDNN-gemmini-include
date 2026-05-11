@@ -33,6 +33,7 @@
 #include "ggml-gemmini-args.h"
 #include <orca/log.h>
 #include <orca/cycle/cycle_reader.hpp>
+#include <orca/quants/panel.hpp>
 
 namespace orca::ggml {
   void ggml_gemmini_prepare_group_meta(ggml_gemmini_args_t &args);
@@ -1701,12 +1702,6 @@ namespace orca {
 #define max_tile_i_j ((size_t)sqrt(mats_in_acc))
 #define max_tile_k (mats_in_partition / max_tile_i_j)
 
-#define partition_rows (BANK_NUM * BANK_ROWS / 2)
-#define mats_in_partition (partition_rows / DIM)
-#define mats_in_acc (ACC_ROWS / DIM)
-#define max_tile_i_j ((size_t)sqrt(mats_in_acc))
-#define max_tile_k (mats_in_partition / max_tile_i_j)
-
     // "db_" means "double-buffered"
 #define db_partition_rows ((BANK_NUM * BANK_ROWS / 2) / 2)
 #define db_mats_in_partition (db_partition_rows / DIM)
@@ -1810,8 +1805,21 @@ namespace orca {
     }
 
     if (args->A == nullptr || args->B == nullptr || args->f_out == nullptr ||
-        args->c_b == nullptr || args->s_rf == nullptr || args->R == nullptr)
+        args->c_b == nullptr)
       return;
+
+    // Panel path requires s_rf_panel/R_panel; row-wise path requires s_rf/R
+    const size_t panel_J_check = args->panel_J > 0 ? args->panel_J : 1;
+    if (panel_J_check > 1)
+    {
+      if (args->s_rf_panel == nullptr || args->R_panel == nullptr)
+        return;
+    }
+    else
+    {
+      if (args->s_rf == nullptr || args->R == nullptr)
+        return;
+    }
 
     if (args->tile_I == 0 || args->tile_J == 0 || args->tile_K == 0)
       gemmini_set_tile(args);
@@ -1836,14 +1844,16 @@ namespace orca {
     const size_t out_row_stride = args->stride_f_out ? args->stride_f_out : dim_J;
     const size_t out_col_stride = args->col_stride_f_out ? args->col_stride_f_out : 1;
     const size_t scale_rows = args->blocks_J > 0 ? args->blocks_J : dim_J;
+    const size_t panel_J = args->panel_J > 0 ? args->panel_J : 1;
+    const bool use_panel_scales = (panel_J > 1) && (args->s_rf_panel != nullptr) && (args->R_panel != nullptr);
 
     const size_t num_i_tiles = (dim_I + tile_I - 1) / tile_I;
     const size_t num_j_tiles = (dim_J + tile_J - 1) / tile_J;
-    const size_t num_k_tiles = (dim_K + tile_K - 1) / tile_K;
+    const size_t num_tile_ks = (dim_K + tile_K - 1) / tile_K;
 
     orca_log_debug_layer(layer,
-        "[tiled_block_matmul_auto] dim=(I=%zu,J=%zu,K=%zu) tile_size: A=(I=%zu x K=%zu) B=(J=%zu x K=%zu) | num_tiles: I=%zu J=%zu K=%zu blocks_per_row=%zu",
-        dim_I, dim_J, dim_K, tile_I, tile_K, tile_J, tile_K, num_i_tiles, num_j_tiles, num_k_tiles, args->blocks_per_row);
+        "[tiled_block_matmul_auto] dim=(I=%zu,J=%zu,K=%zu) tile_size: A=(I=%zu x K=%zu) B=(J=%zu x K=%zu) | num_panels: I=%zu J=%zu K=%zu blocks_per_row=%zu panel_J=%zu",
+        dim_I, dim_J, dim_K, tile_I, tile_K, tile_J, tile_K, num_i_tiles, num_j_tiles, num_tile_ks, args->blocks_per_row, panel_J);
 
     for (size_t i = 0; i < dim_I; ++i)
     {
@@ -1870,12 +1880,22 @@ namespace orca {
       for (size_t tile_j = 0; tile_j < dim_J; tile_j += tile_J)
       {
         const size_t tile_j_actual = std::min(tile_J, dim_J - tile_j);
+        const size_t panel_col_idx = tile_j / tile_J;
+        orca_log_debug_layer(layer,
+            "[preload] weight panel: tile_j=%zu tile_j_actual=%zu panel_col=%zu panel_J=%zu use_panel=%s",
+            tile_j, tile_j_actual, panel_col_idx, panel_J,
+            use_panel_scales ? "yes" : "no");
 
-        for (size_t k_tile = 0; k_tile < dim_K; k_tile += tile_K)
+        for (size_t tile_k = 0; tile_k < dim_K; tile_k += tile_K)
         {
-          const size_t tile_k_actual = std::min(tile_K, dim_K - k_tile);
+          const size_t tile_k_actual = std::min(tile_K, dim_K - tile_k);
           const size_t tile_k_padded = ((tile_k_actual + block_size_k - 1) / block_size_k) * block_size_k;
-          const int tile_col_idx = static_cast<int>(k_tile / tile_K);
+          const int tile_col_idx = static_cast<int>(tile_k / tile_K);
+          const size_t wavefront = static_cast<size_t>(tile_row_idx) + panel_col_idx;
+          orca_log_debug_layer(layer,
+              "[wavefront] wave=%zu tile=(row=%d,col=%zu) panel=(I=%zu,J=%zu)",
+              wavefront, tile_row_idx, panel_col_idx,
+              tile_i_actual, tile_j_actual);
 
           acc32.assign(tile_i_actual * tile_j_actual, 0);
           a_tile.assign(tile_i_actual * tile_k_padded, 0);
@@ -1896,17 +1916,21 @@ namespace orca {
               for (size_t kk = 0; kk < tile_k_actual; ++kk)
               {
                 const size_t src_i = tile_i + i;
-                const size_t src_k = k_tile + kk;
+                const size_t src_k = tile_k + kk;
                 a_tile[i * tile_k_padded + kk] = args->transpose_A
                                                     ? A[src_k * stride_A + src_i]
                                                     : A[src_i * stride_A + src_k];
               }
             }
           }
+          orca_log_debug_layer(layer,
+              "[prefetch] activation tile: tile_i=%zu tile_k=%zu size=(%zu x %zu) quantized=%s",
+              tile_i, tile_k, tile_i_actual, tile_k_actual,
+              quantized_by_adapter ? "yes" : "no");
 
           for (size_t k_block = 0; k_block < tile_k_actual;)
           {
-            const size_t global_k = k_tile + k_block;
+            const size_t global_k = tile_k + k_block;
             const size_t k_in_weight_block = global_k % block_size_k;
             const size_t block_k_actual = std::min(block_size_k - k_in_weight_block, tile_k_actual - k_block);
             const size_t weight_blk = global_k / block_size_k;
@@ -1935,7 +1959,9 @@ namespace orca {
                 const size_t scale_idx = global_j * args->blocks_per_row + weight_blk;
                 const uint64_t c_eff =
                     static_cast<uint64_t>(static_cast<uint16_t>(args->c_b[scale_idx])) +
-                    static_cast<uint64_t>(args->R[global_j]);
+                    (use_panel_scales
+                        ? static_cast<uint64_t>(args->R_panel[global_j / panel_J])
+                        : static_cast<uint64_t>(args->R[global_j]));
                 const int64_t acc_before = acc_row[j];
                 acc_row[j] += static_cast<int64_t>(block_dot) * static_cast<int64_t>(c_eff);
 
@@ -1943,14 +1969,15 @@ namespace orca {
                 {
                     orca_log_debug_layer(layer,
                         "[tiled_block_matmul_auto] block-dequant i=%zu j=%zu k=%zu weight_blk=%zu "
-                        "dot=%d c_b=%u R=%u c_eff=%llu acc_before=%ld acc_after=%ld",
-                        tile_i + i, global_j, k_tile + k_block, weight_blk,
+                        "dot=%d c_b=%u R=%u c_eff=%llu acc_before=%ld acc_after=%ld panel=%s",
+                        tile_i + i, global_j, tile_k + k_block, weight_blk,
                         block_dot,
                         static_cast<unsigned int>(args->c_b[scale_idx]),
-                        static_cast<unsigned int>(args->R[global_j]),
+                        use_panel_scales ? static_cast<unsigned int>(args->R_panel[global_j / panel_J]) : static_cast<unsigned int>(args->R[global_j]),
                         static_cast<unsigned long long>(c_eff),
                         static_cast<long>(acc_before),
-                        static_cast<long>(acc_row[j]));
+                        static_cast<long>(acc_row[j]),
+                        use_panel_scales ? "1" : "0");
                 }
               }
             }
@@ -1961,8 +1988,8 @@ namespace orca {
           orca_log_debug_layer(layer,
               "[tiled_block_matmul_auto] iter I=[%zu:%zu) J=[%zu:%zu) K=[%zu:%zu) K_pad=%zu blk=[%zu:%zu) pad=%zu e_t=%d m=%d q=%d",
               tile_i, tile_i + tile_i_actual, tile_j, tile_j + tile_j_actual,
-              k_tile, k_tile + tile_k_actual, tile_k_padded,
-              k_tile / block_size_k, (k_tile + tile_k_actual + block_size_k - 1) / block_size_k,
+              tile_k, tile_k + tile_k_actual, tile_k_padded,
+              tile_k / block_size_k, (tile_k + tile_k_actual + block_size_k - 1) / block_size_k,
               tile_k_padded - tile_k_actual,
               static_cast<int>(args->activation_e_t),
               static_cast<int>(args->activation_m),
@@ -1980,22 +2007,26 @@ namespace orca {
               if (global_j >= scale_rows)
                 continue;
 
-              const float acc_fp = static_cast<float>(static_cast<double>(acc_row[j]) * static_cast<double>(args->s_rf[global_j]));
+              const float s_rf_val = use_panel_scales
+                  ? args->s_rf_panel[global_j / panel_J]
+                  : args->s_rf[global_j];
+              const float acc_fp = static_cast<float>(static_cast<double>(acc_row[j]) * static_cast<double>(s_rf_val));
               const float contrib = gemmini_detail::apply_activation_exponent(acc_fp, args->activation_e_t, args->activation_m);
 
               if (i == 0 && j == 0)
               {
                   const double activation_exp = gemmini_detail::apply_activation_exponent(1.0f, args->activation_e_t, args->activation_m);
                   orca_log_debug_layer(layer,
-                      "[tiled_block_matmul_auto] tile-dequant i=%zu j=%zu "
-                      "acc=%ld s_rf=%.9f acc*s_rf=%.6f exp=%.6f contrib=%.6f -> f_out+=%.6f",
+                      "[tiled_block_matmul_auto] panel-dequant i=%zu j=%zu "
+                      "acc=%ld s_rf=%.9f acc*s_rf=%.6f exp=%.6f contrib=%.6f -> f_out+=%.6f panel=%s",
                       tile_i + i, global_j,
                       static_cast<long>(acc_row[j]),
-                      static_cast<double>(args->s_rf[global_j]),
+                      static_cast<double>(s_rf_val),
                       static_cast<double>(acc_fp),
                       activation_exp,
                       static_cast<double>(contrib),
-                      static_cast<double>(row_out[global_j * out_col_stride] + contrib));
+                      static_cast<double>(row_out[global_j * out_col_stride] + contrib),
+                      use_panel_scales ? "1" : "0");
               }
 
               row_out[global_j * out_col_stride] += contrib;
@@ -2199,11 +2230,11 @@ namespace aisa
         logical_block_K = std::min(logical_block_K, to_group_boundary);
       }
       const size_t aligned_block_K = ((logical_block_K + DIM - 1) / DIM) * DIM;
-      const size_t block_tiles = std::max<size_t>(1, aligned_block_K / DIM);
-      const size_t block_tile_K = std::max<size_t>(1, std::min(tile_K, block_tiles));
+      const size_t bloctile_ks = std::max<size_t>(1, aligned_block_K / DIM);
+      const size_t bloctile_k_K = std::max<size_t>(1, std::min(tile_K, bloctile_ks));
 
-      // orca_log_debug(layer, "[k-block] idx=%zu k_off=%zu block_K=%zu block_tile_K=%zu",
-      //                k_block_count, k_offset, logical_block_K, block_tile_K);
+      // orca_log_debug(layer, "[k-block] idx=%zu k_off=%zu block_K=%zu bloctile_k_K=%zu",
+      //                k_block_count, k_offset, logical_block_K, bloctile_k_K);
 
       processed_k += logical_block_K;
       ++k_block_count;
@@ -2287,14 +2318,14 @@ namespace aisa
       const void *D_block = first_block ? args->D : nullptr;
       args->gemmini_call_k_logical = logical_block_K;
       args->gemmini_call_k_aligned = gemmini_block_K;
-      args->gemmini_call_tile_k_elems = block_tile_K * DIM;
+      args->gemmini_call_tile_k_elems = bloctile_k_K * DIM;
 
 #if GEMMINI_WS_DEBUG
       orca_log_debug_layer(
           layer,
           "[k-block.call] idx=%zu k_off=%zu logical=%zu aligned=%zu tileK=%zu first=%d "
           "ptr=(A:%p,B:%p,D:%p) stride=(A:%zu,B:%zu) type=%d",
-          k_block_count - 1, k_offset, logical_block_K, gemmini_block_K, block_tile_K,
+          k_block_count - 1, k_offset, logical_block_K, gemmini_block_K, bloctile_k_K,
           first_block ? 1 : 0,
           (const void *)A_block, (const void *)B_block, D_block,
           block_stride_A, block_stride_B,
@@ -2305,7 +2336,7 @@ namespace aisa
       orca_log_cycle(layer, "[tiled_matmul_auto_fp32] cpu.Setting tile dividing by group-size", start, end);
 
       start = orca::cycle::read();
-      // auto tiling으로 선정된 K 타일을 block에 매칭하여 block_tile_K를 사용해 호출
+      // auto tiling으로 선정된 K 타일을 block에 매칭하여 bloctile_k_K를 사용해 호출
       if (cpu_fallback)
       {
         tiled_matmul_int32(dim_I, dim_J, gemmini_block_K,
@@ -2313,7 +2344,7 @@ namespace aisa
                            block_stride_A, block_stride_B, args->sD, dim_J,
                            1.0f, 1.0f, args->scale_D,
                            act, args->scale, args->bert_scale, args->repeating_bias,
-                           tile_I, tile_J, block_tile_K,
+                           tile_I, tile_J, bloctile_k_K,
                            args->transpose_A, args->transpose_B,
                            true, args->low_D,
                            args->weightA,
@@ -2326,7 +2357,7 @@ namespace aisa
                      block_stride_A, block_stride_B, args->sD, dim_J,
                      1.0f, 1.0f, args->scale_D,
                      act, args->scale, args->bert_scale, args->repeating_bias,
-                     tile_I, tile_J, block_tile_K,
+                     tile_I, tile_J, bloctile_k_K,
                      args->transpose_A, args->transpose_B,
                      args->full_C, args->low_D,
                      args->weightA,
