@@ -36,12 +36,34 @@
 #include <orca/quants/panel.hpp>
 
 namespace orca::ggml {
+  // Shared args contract imported from ggml_gemmini_args_t:
+  // - args.tile_I/tile_J/tile_K are Gemmini tile counts in DIM units.
+  // - args.tile_*_elems() expands those counts into logical element spans.
+  // - args.panel_J is already a logical J-axis element count for shared panels.
   void ggml_gemmini_prepare_group_meta(ggml_gemmini_args_t &args);
+  int16_t ggml_gemmini_resolve_tile_row_activation_e_t(const ggml_gemmini_args_t &args,
+                                                       int tile_row);
   void ggml_gemmini_dequant_acc_block(const ggml_gemmini_args_t &args,
                                       size_t k_offset,
                                       size_t block_k,
                                       const int32_t *acc32,
                                       size_t acc_stride);
+  void ggml_gemmini_update_q80_r_rowwise_output(const orca::quants::Panel &panel_c,
+                                                const int64_t *acc64,
+                                                size_t acc_stride,
+                                                const float *s_rf,
+                                                float activation_scale,
+                                                float *dst,
+                                                size_t dst_row_stride,
+                                                size_t dst_col_stride);
+  void ggml_gemmini_update_q80_r_panel_output(const orca::quants::Panel &panel_c,
+                                              const int64_t *acc64,
+                                              size_t acc_stride,
+                                              float s_rf_panel,
+                                              float activation_scale,
+                                              float *dst,
+                                              size_t dst_row_stride,
+                                              size_t dst_col_stride);
   void dequant_acc_block_q80_r(const ggml_gemmini_args_t &args,
                                size_t k_offset,
                                size_t block_k,
@@ -1220,6 +1242,29 @@ static void matmul_cpu(bool transA, bool transB, size_t DIM_I, size_t DIM_J, siz
   }
 }
 
+namespace orca {
+  // FP32 matmul fallback; dimension/transpose conventions follow matmul_cpu
+  static void matmul_cpu_fp(bool transA, bool transB, size_t DIM_I, size_t DIM_J, size_t DIM_K,
+                            const float* A, const float* B, const float* D,
+                            float* C,
+                            size_t stride_A, size_t stride_B, size_t stride_D, size_t stride_C) {
+    for (size_t i = 0; i < DIM_I; i++) {
+      for (size_t j = 0; j < DIM_J; j++) {
+        float sum = 0.0f;
+        for (size_t k = 0; k < DIM_K; k++) {
+          float a = transA ? A[k * stride_A + i] : A[i * stride_A + k];
+          float b = transB ? B[j * stride_B + k] : B[k * stride_B + j];
+          sum += a * b;
+        }
+        if (D != NULL) {
+          sum += D[i * stride_D + j];
+        }
+        C[i * stride_C + j] = sum;
+      }
+    }
+  }
+}
+
 namespace aisa
 {
   static void matmul_cpu_int32(bool transA, bool transB, size_t DIM_I, size_t DIM_J, size_t DIM_K,
@@ -1808,8 +1853,9 @@ namespace orca {
         args->c_b == nullptr)
       return;
 
-    // Panel path requires s_rf_panel/R_panel; row-wise path requires s_rf/R
-    const size_t panel_J_check = args->panel_J > 0 ? args->panel_J : 1;
+    // Panel path requires s_rf_panel/R_panel when panel_J spans multiple logical
+    // output columns; row-wise path requires s_rf/R.
+    const size_t panel_J_check = args->panel_J_or_rowwise_elems();
     if (panel_J_check > 1)
     {
       if (args->s_rf_panel == nullptr || args->R_panel == nullptr)
@@ -1838,14 +1884,29 @@ namespace orca {
     if (block_size_k == 0)
       return;
 
-    const size_t tile_I = std::max<size_t>(1, args->tile_I) * static_cast<size_t>(DIM);
-    const size_t tile_J = std::max<size_t>(1, args->tile_J) * static_cast<size_t>(DIM);
-    const size_t tile_K = std::max<size_t>(1, args->tile_K) * static_cast<size_t>(DIM);
+    const size_t tile_I = args->tile_I_elems();
+    const size_t tile_J = args->tile_J_elems();
+    const size_t tile_K = args->tile_K_elems();
     const size_t out_row_stride = args->stride_f_out ? args->stride_f_out : dim_J;
     const size_t out_col_stride = args->col_stride_f_out ? args->col_stride_f_out : 1;
     const size_t scale_rows = args->blocks_J > 0 ? args->blocks_J : dim_J;
-    const size_t panel_J = args->panel_J > 0 ? args->panel_J : 1;
+    const size_t panel_J = args->panel_J_or_rowwise_elems();
     const bool use_panel_scales = (panel_J > 1) && (args->s_rf_panel != nullptr) && (args->R_panel != nullptr);
+
+    for (size_t i = 0; i < dim_I; ++i)
+    {
+      float *row_out = args->f_out + i * out_row_stride;
+      for (size_t j = 0; j < dim_J; ++j)
+        row_out[j * out_col_stride] = 0.0f;
+    }
+
+    if (use_panel_scales && !orca::ggml::ggml_gemmini_panel_mode_matches_tile_j(args->panel_J, tile_J))
+    {
+      orca_log_debug_layer(layer,
+          "[tiled_block_matmul_auto] reject panel mode contract: panel_J=%zu tile_J_elems=%zu",
+          args->panel_J, tile_J);
+      return;
+    }
 
     const size_t num_i_tiles = (dim_I + tile_I - 1) / tile_I;
     const size_t num_j_tiles = (dim_J + tile_J - 1) / tile_J;
@@ -1854,13 +1915,6 @@ namespace orca {
     orca_log_debug_layer(layer,
         "[tiled_block_matmul_auto] dim=(I=%zu,J=%zu,K=%zu) tile_size: A=(I=%zu x K=%zu) B=(J=%zu x K=%zu) | num_panels: I=%zu J=%zu K=%zu blocks_per_row=%zu panel_J=%zu",
         dim_I, dim_J, dim_K, tile_I, tile_K, tile_J, tile_K, num_i_tiles, num_j_tiles, num_tile_ks, args->blocks_per_row, panel_J);
-
-    for (size_t i = 0; i < dim_I; ++i)
-    {
-      float *row_out = args->f_out + i * out_row_stride;
-      for (size_t j = 0; j < dim_J; ++j)
-        row_out[j * out_col_stride] = 0.0f;
-    }
 
     static thread_local std::vector<elem_t> a_tile;
     static thread_local std::vector<int64_t> acc32;
@@ -1886,6 +1940,9 @@ namespace orca {
             tile_j, tile_j_actual, panel_col_idx, panel_J,
             use_panel_scales ? "yes" : "no");
 
+        acc32.assign(tile_i_actual * tile_j_actual, 0);
+        bool panel_quantized_by_adapter = false;
+
         for (size_t tile_k = 0; tile_k < dim_K; tile_k += tile_K)
         {
           const size_t tile_k_actual = std::min(tile_K, dim_K - tile_k);
@@ -1897,7 +1954,6 @@ namespace orca {
               wavefront, tile_row_idx, panel_col_idx,
               tile_i_actual, tile_j_actual);
 
-          acc32.assign(tile_i_actual * tile_j_actual, 0);
           a_tile.assign(tile_i_actual * tile_k_padded, 0);
 
           const size_t saved_tile_I = args->tile_I;
@@ -1908,6 +1964,7 @@ namespace orca {
               *args, reinterpret_cast<int8_t *>(a_tile.data()), tile_row_idx, tile_col_idx);
           args->tile_I = saved_tile_I;
           args->tile_K = saved_tile_K;
+          panel_quantized_by_adapter = panel_quantized_by_adapter || quantized_by_adapter;
 
           if (!quantized_by_adapter)
           {
@@ -1994,44 +2051,55 @@ namespace orca {
               static_cast<int>(args->activation_e_t),
               static_cast<int>(args->activation_m),
               quantized_by_adapter ? 1 : 0);
+        }
 
-          for (size_t i = 0; i < tile_i_actual; ++i)
-          {
-            const size_t global_i = tile_i + i;
-            const int64_t *acc_row = acc32.data() + i * tile_j_actual;
-            float *row_out = args->f_out + global_i * out_row_stride;
+        const int16_t tile_activation_e_t = orca::ggml::ggml_gemmini_resolve_tile_row_activation_e_t(*args, tile_row_idx);
+        const float activation_scale = gemmini_detail::apply_activation_exponent(1.0f, tile_activation_e_t, args->activation_m);
+        const orca::quants::Panel output_panel(tile_i_actual, tile_j_actual, tile_i, tile_j);
+        float *panel_out = args->f_out + tile_i * out_row_stride + tile_j * out_col_stride;
 
-            for (size_t j = 0; j < tile_j_actual; ++j)
-            {
-              const size_t global_j = tile_j + j;
-              if (global_j >= scale_rows)
-                continue;
+        if (tile_i_actual > 0 && tile_j_actual > 0 && tile_j < scale_rows)
+        {
+          const float s_rf_val = use_panel_scales ? args->s_rf_panel[panel_col_idx] : args->s_rf[tile_j];
+          const float acc_fp = static_cast<float>(static_cast<double>(acc32[0]) * static_cast<double>(s_rf_val));
+          const float contrib = acc_fp * activation_scale;
+          orca_log_debug_layer(layer,
+              "[tiled_block_matmul_auto] panel-dequant i=%zu j=%zu "
+              "acc=%ld s_rf=%.9f acc*s_rf=%.6f exp=%.6f contrib=%.6f -> f_out+=%.6f panel=%s q=%d",
+              tile_i, tile_j,
+              static_cast<long>(acc32[0]),
+              static_cast<double>(s_rf_val),
+              static_cast<double>(acc_fp),
+              static_cast<double>(activation_scale),
+              static_cast<double>(contrib),
+              static_cast<double>(panel_out[0] + contrib),
+              use_panel_scales ? "1" : "0",
+              panel_quantized_by_adapter ? 1 : 0);
+        }
 
-              const float s_rf_val = use_panel_scales
-                  ? args->s_rf_panel[global_j / panel_J]
-                  : args->s_rf[global_j];
-              const float acc_fp = static_cast<float>(static_cast<double>(acc_row[j]) * static_cast<double>(s_rf_val));
-              const float contrib = gemmini_detail::apply_activation_exponent(acc_fp, args->activation_e_t, args->activation_m);
-
-              if (i == 0 && j == 0)
-              {
-                  const double activation_exp = gemmini_detail::apply_activation_exponent(1.0f, args->activation_e_t, args->activation_m);
-                  orca_log_debug_layer(layer,
-                      "[tiled_block_matmul_auto] panel-dequant i=%zu j=%zu "
-                      "acc=%ld s_rf=%.9f acc*s_rf=%.6f exp=%.6f contrib=%.6f -> f_out+=%.6f panel=%s",
-                      tile_i + i, global_j,
-                      static_cast<long>(acc_row[j]),
-                      static_cast<double>(s_rf_val),
-                      static_cast<double>(acc_fp),
-                      activation_exp,
-                      static_cast<double>(contrib),
-                      static_cast<double>(row_out[global_j * out_col_stride] + contrib),
-                      use_panel_scales ? "1" : "0");
-              }
-
-              row_out[global_j * out_col_stride] += contrib;
-            }
-          }
+        if (use_panel_scales)
+        {
+          orca::ggml::ggml_gemmini_update_q80_r_panel_output(
+              output_panel,
+              acc32.data(),
+              tile_j_actual,
+              args->s_rf_panel[panel_col_idx],
+              activation_scale,
+              panel_out,
+              out_row_stride,
+              out_col_stride);
+        }
+        else
+        {
+          orca::ggml::ggml_gemmini_update_q80_r_rowwise_output(
+              output_panel,
+              acc32.data(),
+              tile_j_actual,
+              args->s_rf,
+              activation_scale,
+              panel_out,
+              out_row_stride,
+              out_col_stride);
         }
       }
     }
