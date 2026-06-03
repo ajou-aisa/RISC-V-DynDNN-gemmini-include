@@ -29,69 +29,12 @@
 // Counter Definition
 #include "gemmini_counter.h"
 
-// llama.cpp의 args를 include (relative to repo)
 #include "ggml-gemmini-args.h"
 #include <gemmini/log.h>
 #include <gemmini/cycle_reader.hpp>
 #include <gemmini/layer.hpp>
 #include "quants/stripe.hpp"
-
-namespace ggml { namespace gemmini {
-  template <typename...>
-  using void_t = void;
-
-  // Shared args contract imported from ggml_gemmini_args_t:
-  // - args.tile_I/tile_J/tile_K are Gemmini tile counts in DIM units.
-  // - args.tile_*_elems() expands those counts into logical element spans.
-  // - args.stripe_J is already a logical J-axis element count for shared stripes.
-  inline bool ggml_gemmini_stripe_mode_matches_tile_j(size_t stripe_J, size_t tile_J_elems) {
-      return stripe_J <= 1 || (tile_J_elems > 0 && stripe_J == tile_J_elems);
-  }
-
-  void dequant_acc_block_with_activation_exponent(
-      const ggml_gemmini_args_t &args,
-      size_t k_offset,
-      size_t block_k,
-      const int32_t *acc32,
-      size_t acc_stride,
-      int16_t activation_e_t);
-
-  template <typename ScaleFn>
-  void update_q80_r_output_impl(
-      const quants::Stripe &stripe_c,
-      const int64_t *acc64,
-      size_t acc_stride,
-      ScaleFn scale_for_column,
-      float activation_scale,
-      float *dst,
-      size_t dst_row_stride,
-      size_t dst_col_stride) {
-      if (stripe_c.empty() || !acc64 || !dst || acc_stride == 0 || dst_row_stride == 0 || dst_col_stride == 0) {
-          return;
-      }
-
-      for (size_t i = 0; i < stripe_c.I; ++i) {
-          const int64_t *row_acc64 = acc64 + i * acc_stride;
-          float *row_out = dst + i * dst_row_stride;
-
-          for (size_t j = 0; j < stripe_c.J; ++j) {
-              const size_t global_j = stripe_c.col_offset + j;
-              float contrib = static_cast<float>(
-                  static_cast<double>(row_acc64[j]) * static_cast<double>(scale_for_column(global_j)));
-              contrib *= activation_scale;
-              row_out[j * dst_col_stride] += contrib;
-          }
-      }
-  }
-
-  namespace quants {
-    void ggml_gemmini_quantize_activation_tile(const ggml_tensor *src,
-                                               ggml_gemmini_args_t &args,
-                                               int8_t *dst,
-                                               int tile_row,
-                                               int tile_col);
-  }
-}} // namespace ggml::gemmini
+#include "quants/common/dequant.hpp"
 
 #define k_CONFIG 0
 #define k_MVIN2 1
@@ -1694,41 +1637,6 @@ static size_t tiled_matmul_total_acc_rows(size_t I, size_t J) {
 
 namespace ggml { namespace gemmini {
   namespace gemmini_detail {
-    template <typename Args, typename = void>
-    struct has_activation_src : std::false_type
-    {
-    };
-
-    template <typename Args>
-    struct has_activation_src<Args, void_t<decltype(std::declval<Args &>().activation_src)>> : std::true_type
-    {
-    };
-
-    template <typename Args>
-    static bool quantize_activation_tile_if_available(Args &args,
-                                                      int8_t *dst,
-                                                      int tile_row,
-                                                      int tile_col)
-    {
-      if constexpr (has_activation_src<Args>::value)
-      {
-        if (args.activation_src == nullptr)
-          return false;
-
-        ggml::gemmini::quants::ggml_gemmini_quantize_activation_tile(
-            args.activation_src, args, dst, tile_row, tile_col);
-        return true;
-      }
-      else
-      {
-        (void)args;
-        (void)dst;
-        (void)tile_row;
-        (void)tile_col;
-        return false;
-      }
-    }
-
     static inline float apply_activation_exponent(float value, int16_t e_t, int16_t m)
     {
       if (e_t == std::numeric_limits<int16_t>::min())
@@ -1912,7 +1820,7 @@ namespace ggml { namespace gemmini {
         row_out[j * out_col_stride] = 0.0f;
     }
 
-    if (use_stripe_scales && !ggml::gemmini::ggml_gemmini_stripe_mode_matches_tile_j(args->stripe_J, tile_J))
+    if (use_stripe_scales && !args->stripe_mode_matches_tile_j(tile_J))
     {
       gemmini_log_debug_layer(layer,
           "[tiled_block_matmul_auto] reject stripe mode contract: stripe_J=%zu tile_J_elems=%zu",
@@ -1953,7 +1861,6 @@ namespace ggml { namespace gemmini {
             use_stripe_scales ? "yes" : "no");
 
         acc32.assign(tile_i_actual * tile_j_actual, 0);
-        bool stripe_quantized_by_adapter = false;
 
         for (size_t tile_k = 0; tile_k < dim_K; tile_k += tile_K)
         {
@@ -1968,34 +1875,20 @@ namespace ggml { namespace gemmini {
 
           a_tile.assign(tile_i_actual * tile_k_padded, 0);
 
-          const size_t saved_tile_I = args->tile_I;
-          const size_t saved_tile_K = args->tile_K;
-          args->tile_I = tile_I;
-          args->tile_K = tile_K;
-          const bool quantized_by_adapter = gemmini_detail::quantize_activation_tile_if_available(
-              *args, reinterpret_cast<int8_t *>(a_tile.data()), tile_row_idx, tile_col_idx);
-          args->tile_I = saved_tile_I;
-          args->tile_K = saved_tile_K;
-          stripe_quantized_by_adapter = stripe_quantized_by_adapter || quantized_by_adapter;
-
-          if (!quantized_by_adapter)
+          for (size_t i = 0; i < tile_i_actual; ++i)
           {
-            for (size_t i = 0; i < tile_i_actual; ++i)
+            for (size_t kk = 0; kk < tile_k_actual; ++kk)
             {
-              for (size_t kk = 0; kk < tile_k_actual; ++kk)
-              {
-                const size_t src_i = tile_i + i;
-                const size_t src_k = tile_k + kk;
-                a_tile[i * tile_k_padded + kk] = args->transpose_A
-                                                    ? A[src_k * stride_A + src_i]
-                                                    : A[src_i * stride_A + src_k];
-              }
+              const size_t src_i = tile_i + i;
+              const size_t src_k = tile_k + kk;
+              a_tile[i * tile_k_padded + kk] = args->transpose_A
+                                                  ? A[src_k * stride_A + src_i]
+                                                  : A[src_i * stride_A + src_k];
             }
           }
           gemmini_log_debug_layer(layer,
-              "[prefetch] activation tile: tile_i=%zu tile_k=%zu size=(%zu x %zu) quantized=%s",
-              tile_i, tile_k, tile_i_actual, tile_k_actual,
-              quantized_by_adapter ? "yes" : "no");
+              "[prefetch] activation tile: tile_i=%zu tile_k=%zu size=(%zu x %zu)",
+              tile_i, tile_k, tile_i_actual, tile_k_actual);
 
           for (size_t k_block = 0; k_block < tile_k_actual;)
           {
@@ -2060,13 +1953,13 @@ namespace ggml { namespace gemmini {
               tile_k, tile_k + tile_k_actual, tile_k_padded,
               tile_k / block_size_k, (tile_k + tile_k_actual + block_size_k - 1) / block_size_k,
               tile_k_padded - tile_k_actual,
-              static_cast<int>(args->activation_e_t),
+              static_cast<int>(args->activation_e_s),
               static_cast<int>(args->activation_m),
-              quantized_by_adapter ? 1 : 0);
+              0);
         }
 
-        const int16_t tile_activation_e_t = args->resolve_tile_row_activation_e_t(tile_row_idx);
-        const float activation_scale = gemmini_detail::apply_activation_exponent(1.0f, tile_activation_e_t, args->activation_m);
+        const int16_t tile_activation_e_s = args->resolve_stripe_activation_e_s(tile_row_idx);
+        const float activation_scale = gemmini_detail::apply_activation_exponent(1.0f, tile_activation_e_s, args->activation_m);
         const ggml::gemmini::quants::Stripe output_stripe(tile_i_actual, tile_j_actual, tile_i, tile_j);
         float *stripe_out = args->f_out + tile_i * out_row_stride + tile_j * out_col_stride;
 
@@ -2077,7 +1970,7 @@ namespace ggml { namespace gemmini {
           const float contrib = acc_fp * activation_scale;
           gemmini_log_debug_layer(layer,
               "[tiled_block_matmul_auto] stripe-dequant i=%zu j=%zu "
-              "acc=%ld s_rf=%.9f acc*s_rf=%.6f exp=%.6f contrib=%.6f -> f_out+=%.6f stripe=%s q=%d",
+              "acc=%ld s_rf=%.9f acc*s_rf=%.6f exp=%.6f contrib=%.6f -> f_out+=%.6f stripe=%s",
               tile_i, tile_j,
               static_cast<long>(acc32[0]),
               static_cast<double>(s_rf_val),
@@ -2085,8 +1978,7 @@ namespace ggml { namespace gemmini {
               static_cast<double>(activation_scale),
               static_cast<double>(contrib),
               static_cast<double>(stripe_out[0] + contrib),
-              use_stripe_scales ? "1" : "0",
-              stripe_quantized_by_adapter ? 1 : 0);
+              use_stripe_scales ? "1" : "0");
         }
 
         if (use_stripe_scales)
@@ -2259,21 +2151,13 @@ namespace ggml { namespace gemmini {
       }
     }
 
-    args->prepare_group_meta();
-    const size_t group_size_k = args->effective_group_size_k > 0
-                                  ? args->effective_group_size_k
-                                  : std::max<size_t>(1, args->block_size_k);
     const size_t weight_block_k = args->block_size_k > 0
                                       ? static_cast<size_t>(args->block_size_k)
                                       : static_cast<size_t>(QK8_0);
-    const size_t group_size_aligned = args->effective_group_size_aligned > 0
-                                          ? args->effective_group_size_aligned
-                                          : ((group_size_k + DIM - 1) / DIM) * DIM;
+    const size_t group_size_k = std::max<size_t>(1, weight_block_k);
+    const size_t group_size_aligned = std::max<size_t>(16, ((group_size_k + DIM - 1) / DIM) * DIM);
     const size_t group_tile_cap = std::max<size_t>(1, group_size_aligned / DIM);
-    if (args->group_scope != GGML_GEMMINI_GROUP_TILE)
-    {
-      tile_K = std::min(tile_K, group_tile_cap);
-    }
+    tile_K = std::min(tile_K, group_tile_cap);
     const size_t max_block_elems = tile_K * DIM;
 
     static thread_local std::vector<elem_t> a_stage;
@@ -2293,21 +2177,7 @@ namespace ggml { namespace gemmini {
       const size_t off_in_weight_block = k_offset % weight_block_k;
       const size_t to_weight_boundary = weight_block_k - off_in_weight_block;
 
-      if (args->group_scope == GGML_GEMMINI_GROUP_TENSOR)
-      {
-        // Tensor activation scale is global, but weight scale is Q8_0-block.
-        logical_block_K = std::min(logical_block_K, to_weight_boundary);
-      }
-      else if (args->group_scope == GGML_GEMMINI_GROUP_BLOCK)
-      {
-        // Block mode must follow both activation-group and weight-block boundaries.
-        logical_block_K = std::min(logical_block_K, std::min(to_group_boundary, to_weight_boundary));
-      }
-      else if (args->group_scope != GGML_GEMMINI_GROUP_TILE && group_size_k < max_block_elems)
-      {
-        // Fallback for future scopes: only split when group is smaller than tile.
-        logical_block_K = std::min(logical_block_K, to_group_boundary);
-      }
+      logical_block_K = std::min(logical_block_K, std::min(to_group_boundary, to_weight_boundary));
       const size_t aligned_block_K = ((logical_block_K + DIM - 1) / DIM) * DIM;
       const size_t bloctile_ks = std::max<size_t>(1, aligned_block_K / DIM);
       const size_t bloctile_k_K = std::max<size_t>(1, std::min(tile_K, bloctile_ks));
@@ -2454,12 +2324,11 @@ namespace ggml { namespace gemmini {
       if (f_out != nullptr)
       {
         GGML_ASSERT(act == NO_ACTIVATION);
-        ggml::gemmini::dequant_acc_block_with_activation_exponent(*args,
+        ggml::gemmini::dequantize(*args,
                                                    k_offset,
                                                    logical_block_K,
                                                    reinterpret_cast<const int32_t *>(acc_ptr32),
-                                                   dim_J,
-                                                   args->activation_e_t);
+                                                   dim_J);
       }
       end = ggml::gemmini::cycle::read();
       gemmini_log_cycle(layer, "[tiled_matmul_auto_fp32] cpu.Dequantize output to fp32", start, end);
