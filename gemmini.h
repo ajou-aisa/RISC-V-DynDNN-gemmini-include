@@ -1220,9 +1220,8 @@ namespace ggml { namespace gemmini {
       }
     }
   }
-}} // namespace ggml::gemmini
 
-namespace ggml { namespace gemmini {
+  // INT8 matmul fallback. Kepp output INT32
   static void matmul_cpu_int32(bool transA, bool transB, size_t DIM_I, size_t DIM_J, size_t DIM_K,
                                const elem_t *A, const elem_t *B, const acc_t *D,
                                void *C,
@@ -1492,116 +1491,18 @@ static void tiled_matmul(size_t dim_I, size_t dim_J, size_t dim_K,
 }
 
 namespace ggml { namespace gemmini {
-  static void tiled_matmul_int32(size_t dim_I, size_t dim_J, size_t dim_K,
-                                 const elem_t *A, const elem_t *B,
-                                 const void *D, void *C,
-                                 size_t stride_A, size_t stride_B, size_t stride_D, size_t stride_C,
-                                 scale_t A_scale_factor, scale_t B_scale_factor, scale_acc_t D_scale_factor,
-                                 int act, acc_scale_t scale, acc_scale_t bert_scale,
-                                 bool repeating_bias,
-                                 size_t tile_I, size_t tile_J, size_t tile_K,
-                                 bool transpose_A, bool transpose_B,
-                                 bool full_C, bool low_D,
-                                 uint8_t weightA,
-                                 enum tiled_matmul_type_t tiled_matmul_type)
-  {
+  // tiled_matmul을 참고하여, fp 텐서를 입력받아 처리하도록 구현.
+  // TODO: 김동현
+  void tiled_matmul_outer_fp(){
+    
+  }
 
-#ifdef GEMMINI_ASSERTIONS
-    if (tile_I <= 0)
-    {
-      printf("tile_I is non-positive\n");
-      exit(1);
-    }
-    else if (tile_J <= 0)
-    {
-      printf("tile_J is non-positive\n");
-      exit(1);
-    }
-    else if (tile_K <= 0)
-    {
-      printf("tile_K is non-positive\n");
-      exit(1);
-    }
+  // tiled matrix mulctiplication fp x fp
+  // TODO: 김동현
+  void tiled_matmul_fp() {
 
-    const size_t dim_I_padded = (dim_I / DIM + (dim_I % DIM != 0)) * DIM;
-    const size_t dim_J_padded = (dim_J / DIM + (dim_J % DIM != 0)) * DIM;
-    const size_t dim_K_padded = (dim_K / DIM + (dim_K % DIM != 0)) * DIM;
-
-    if (tile_I * DIM > dim_I_padded)
-    {
-      printf("tile_I is too large (tile_I * DIM > dim_I_padded)\n");
-      exit(1);
-    }
-    else if (tile_J * DIM > dim_J_padded)
-    {
-      printf("tile_J is too large (tile_J * DIM > dim_J_padded)\n");
-      exit(1);
-    }
-    else if (tile_K * DIM > dim_K_padded)
-    {
-      printf("tile_K is too large (tile_K * DIM > dim_K_padded)\n");
-      exit(1);
-    }
-
-    const bool double_buffered = tiled_matmul_type == WS;
-
-    const size_t total_spad_size = double_buffered ? BANK_NUM * BANK_ROWS / 2 : BANK_NUM * BANK_ROWS;
-    const size_t total_acc_size = double_buffered ? ACC_ROWS / 2 : ACC_ROWS;
-
-    const size_t total_spad_rows =
-        (tile_I * tile_K * DIM) +
-        (tile_K * tile_J * DIM);
-
-    if (total_spad_rows > total_spad_size)
-    {
-      printf("Not enough space in scratchpad to store A and B matrices\n");
-      exit(1);
-    }
-
-    const size_t total_acc_rows =
-        tile_I * tile_J * DIM;
-
-    if (total_acc_rows > total_acc_size)
-    {
-      printf("Not enough space in accumulator to store C\n");
-      exit(1);
-    }
-
-    if (tile_I > 65535 || tile_J > 65535 || tile_K > 65535)
-    {
-      printf("I, J, and K tiling factors must be less than 65535, to fit within the bounds of the LOOP_WS function");
-      exit(1);
-    }
-
-    char matmul_type_str[][4] = {"OS", "WS", "CPU"};
-
-    if (((tiled_matmul_type == OS) && (transpose_A || transpose_B)) ||
-        (tiled_matmul_type == WS && transpose_A && transpose_B))
-    {
-      printf("Not implemented: %s matmul, a_transpose=%d, b_transpose=%d\n", matmul_type_str[tiled_matmul_type], transpose_A, transpose_B);
-      exit(1);
-    }
-
-    if ((tiled_matmul_type == CPU && low_D) ||
-        (tiled_matmul_type == OS && low_D))
-    {
-      printf("Not implemented: %s matmul, low_D=%d\n", matmul_type_str[tiled_matmul_type], low_D);
-    }
-
-    if (act == LAYERNORM || act == SOFTMAX)
-    {
-      if (tiled_matmul_type == OS)
-      {
-        printf("Not implemented: %s matmul, act=%d\n", matmul_type_str[tiled_matmul_type], act);
-      }
-      if (tile_J * DIM < dim_J)
-      {
-        printf("When doing layernorm or softmax, the full J dimension of the matrix must fit in the accumulator\n");
-      }
-    }
-#endif
-
-    if (tiled_matmul_type == OS || tiled_matmul_type == WS)
+    // Run a tiled matrix multiplication on either Gemmini or the CPU
+    /* if (tiled_matmul_type == OS || tiled_matmul_type == WS)
     {
       tiled_matmul_outer(dim_I, dim_J, dim_K,
                          A, B, D, C,
@@ -1614,17 +1515,17 @@ namespace ggml { namespace gemmini {
                          weightA,
                          (int)tiled_matmul_type);
     }
-    else
+    else if (tiled_matmul_type == CPU)
     {
-      matmul_cpu_int32(transpose_A, transpose_B, dim_I, dim_J, dim_K,
-                       A, B, (const acc_t *)D, C,
-                       stride_A, stride_B, stride_D, stride_C,
-                       A_scale_factor, B_scale_factor, D_scale_factor,
-                       act, scale, bert_scale, repeating_bias,
-                       full_C);
-    }
+      matmul_cpu(transpose_A, transpose_B, dim_I, dim_J, dim_K,
+                 A, B, (const acc_t *)D, (elem_t *)C,
+                 stride_A, stride_B, stride_D, stride_C,
+                 A_scale_factor, B_scale_factor, D_scale_factor,
+                 act, scale, bert_scale, repeating_bias);
+    } */
   }
-}} // namespace ggml::gemmini
+}
+}
 
 static size_t tiled_matmul_total_spad_rows(size_t I, size_t J, size_t K) {
   return (I * K + K * J) * DIM;
@@ -1755,7 +1656,8 @@ namespace ggml { namespace gemmini {
                    dim_I, dim_J, dim_K, tile_I, tile_J, tile_K);
   }
 
-  static void tiled_block_matmul_auto(struct ggml_gemmini_args_t *args) {
+  // IM2P WS simulation. target system.
+  static void tiled_matmul_auto_im2p(struct ggml_gemmini_args_t *args) {
     if (args == NULL)
       return;
 
@@ -1765,7 +1667,7 @@ namespace ggml { namespace gemmini {
 
     if (args->tiled_matmul_type != CPU)
     {
-      gemmini_log_debug_layer(layer, "[tiled_block_matmul_auto] only CPU mode is implemented");
+      gemmini_log_debug_layer(layer, "[tiled_matmul_auto_im2p] only CPU mode is implemented");
       return;
     }
 
@@ -1804,9 +1706,9 @@ namespace ggml { namespace gemmini {
     if (block_size_k == 0)
       return;
 
-    const size_t tile_I = args->tile_I_elems();
-    const size_t tile_J = args->tile_J_elems();
-    const size_t tile_K = args->tile_K_elems();
+    const size_t tile_I = args->tile_I;
+    const size_t tile_J = args->tile_J;
+    const size_t tile_K = args->tile_K;
     const size_t out_row_stride = args->stride_f_out ? args->stride_f_out : dim_J;
     const size_t out_col_stride = args->col_stride_f_out ? args->col_stride_f_out : 1;
     const size_t scale_rows = args->blocks_J > 0 ? args->blocks_J : dim_J;
@@ -1820,21 +1722,21 @@ namespace ggml { namespace gemmini {
         row_out[j * out_col_stride] = 0.0f;
     }
 
-    if (use_stripe_scales && !args->stripe_mode_matches_tile_j(tile_J))
+    if (use_stripe_scales && !args->stripe_mode_matches_tile_j(tile_J * DIM))
     {
       gemmini_log_debug_layer(layer,
           "[tiled_block_matmul_auto] reject stripe mode contract: stripe_J=%zu tile_J_elems=%zu",
-          args->stripe_J, tile_J);
+          args->stripe_J, tile_J * DIM);
       return;
     }
 
-    const size_t num_i_tiles = (dim_I + tile_I - 1) / tile_I;
-    const size_t num_j_tiles = (dim_J + tile_J - 1) / tile_J;
-    const size_t num_tile_ks = (dim_K + tile_K - 1) / tile_K;
+    const size_t num_i_tiles = (dim_I + tile_I * DIM - 1) / (tile_I * DIM);
+    const size_t num_j_tiles = (dim_J + tile_J * DIM - 1) / (tile_J * DIM);
+    const size_t num_tile_ks = (dim_K + tile_K * DIM - 1) / (tile_K * DIM);
 
     gemmini_log_debug_layer(layer,
-        "[tiled_block_matmul_auto] dim=(I=%zu,J=%zu,K=%zu) tile_size: A=(I=%zu x K=%zu) B=(J=%zu x K=%zu) | num_stripes: I=%zu J=%zu K=%zu blocks_per_row=%zu stripe_J=%zu",
-        dim_I, dim_J, dim_K, tile_I, tile_K, tile_J, tile_K, num_i_tiles, num_j_tiles, num_tile_ks, args->blocks_per_row, stripe_J);
+        "[tiled_block_matmul_auto] dim=(I=%zu,J=%zu,K=%zu) tile_size: A=(I=%zu x K=%zu) B=(J=%zu x K=%zu) | num_tiles: I=%zu J=%zu K=%zu blocks_per_row=%zu stripe_J=%zu",
+        dim_I, dim_J, dim_K, tile_I * DIM, tile_K * DIM, tile_J * DIM, tile_K * DIM, num_i_tiles, num_j_tiles, num_tile_ks, args->blocks_per_row, stripe_J);
 
     static thread_local std::vector<elem_t> a_tile;
     static thread_local std::vector<int64_t> acc32;
@@ -1846,15 +1748,15 @@ namespace ggml { namespace gemmini {
     if (row_stride_B == 0)
       return;
 
-    for (size_t tile_i = 0; tile_i < dim_I; tile_i += tile_I)
+    for (size_t tile_i = 0; tile_i < dim_I; tile_i += tile_I * DIM)
     {
-      const size_t tile_i_actual = std::min(tile_I, dim_I - tile_i);
-      const int tile_row_idx = static_cast<int>(tile_i / tile_I);
+      const size_t tile_i_actual = std::min(tile_I * DIM, dim_I - tile_i);
+      const int tile_row_idx = static_cast<int>(tile_i / (tile_I * DIM));
 
-      for (size_t tile_j = 0; tile_j < dim_J; tile_j += tile_J)
+      for (size_t tile_j = 0; tile_j < dim_J; tile_j += tile_J * DIM)
       {
-        const size_t tile_j_actual = std::min(tile_J, dim_J - tile_j);
-        const size_t stripe_col_idx = tile_j / tile_J;
+        const size_t tile_j_actual = std::min(tile_J * DIM, dim_J - tile_j);
+        const size_t stripe_col_idx = tile_j / (tile_J * DIM);
         gemmini_log_debug_layer(layer,
             "[preload] weight stripe: tile_j=%zu tile_j_actual=%zu stripe_col=%zu stripe_J=%zu use_stripe=%s",
             tile_j, tile_j_actual, stripe_col_idx, stripe_J,
@@ -1862,11 +1764,11 @@ namespace ggml { namespace gemmini {
 
         acc32.assign(tile_i_actual * tile_j_actual, 0);
 
-        for (size_t tile_k = 0; tile_k < dim_K; tile_k += tile_K)
+        for (size_t tile_k = 0; tile_k < dim_K; tile_k += tile_K * DIM)
         {
-          const size_t tile_k_actual = std::min(tile_K, dim_K - tile_k);
+          const size_t tile_k_actual = std::min(tile_K * DIM, dim_K - tile_k);
           const size_t tile_k_padded = ((tile_k_actual + block_size_k - 1) / block_size_k) * block_size_k;
-          const int tile_col_idx = static_cast<int>(tile_k / tile_K);
+          const int tile_col_idx = static_cast<int>(tile_k / (tile_K * DIM));
           const size_t wavefront = static_cast<size_t>(tile_row_idx) + stripe_col_idx;
           gemmini_log_debug_layer(layer,
               "[wavefront] wave=%zu tile=(row=%d,col=%zu) stripe=(I=%zu,J=%zu)",
@@ -2011,9 +1913,37 @@ namespace ggml { namespace gemmini {
     uint64_t end = ggml::gemmini::cycle::read();
     gemmini_log_cycle(layer, "[tiled_block_matmul_auto] cpu.Q8_0_R tiled matmul", start, end);
   }
+
+  // per-tensor implementation. baseline system.
+  // TODO: 조찬혁
+  static void tiled_matmul_auto_tensor(struct ggml_gemmini_args_t *args){
+    // tiled_matmul_auto를 참고하여, gemmini 호출 후 연산 결과를 per-tensor dequantize하도록 구현. 
+    if (args == NULL)
+      return;
+
+    const char *layer = ggml::gemmini::types::to_string(args->layer_type);
+    uint64_t start = ggml::gemmini::cycle::read();
+
+    if (args->A == nullptr || args->B == nullptr || args->f_out == nullptr ||
+        args->c_b == nullptr)
+      return;
+
+    if (args->tile_I == 0 || args->tile_J == 0 || args->tile_K == 0)
+      gemmini_set_tile(args);
+
+    const size_t dim_I = args->I;
+    const size_t dim_J = args->J;
+    const size_t dim_K = args->K;
+
+    GGML_ASSERT(args->act == NO_ACTIVATION);
+
+    // TODO: call gemmini & dequantize.
+  }
 }} // namespace ggml::gemmini
 namespace ggml { namespace gemmini {
-  static void tiled_matmul_auto_fp32(struct ggml_gemmini_args_t *args)
+  // fp x fp gemmini. baseline system
+  // TODO: 김동현
+  static void tiled_matmul_auto_fp(struct ggml_gemmini_args_t *args)
   {
     const char *layer = ggml::gemmini::types::to_string(args->layer_type);
 
@@ -2033,262 +1963,13 @@ namespace ggml { namespace gemmini {
     size_t tile_J = args->tile_J;
     size_t tile_K = args->tile_K;
 
-//     // gemmini 기본 auto tiling
-// #define partition_rows (BANK_NUM * BANK_ROWS / 2)
-// #define mats_in_partition (partition_rows / DIM)
-// #define mats_in_acc (ACC_ROWS / DIM)
-// #define max_tile_i_j ((size_t)sqrt(mats_in_acc))
-// #define max_tile_k (mats_in_partition / max_tile_i_j)
-
-// #define partition_rows (BANK_NUM * BANK_ROWS / 2)
-// #define mats_in_partition (partition_rows / DIM)
-// #define mats_in_acc (ACC_ROWS / DIM)
-// #define max_tile_i_j ((size_t)sqrt(mats_in_acc))
-// #define max_tile_k (mats_in_partition / max_tile_i_j)
-
-//     // "db_" means "double-buffered"
-// #define db_partition_rows ((BANK_NUM * BANK_ROWS / 2) / 2)
-// #define db_mats_in_partition (db_partition_rows / DIM)
-// #define db_mats_in_acc ((ACC_ROWS / 2) / DIM)
-// #define db_max_tile_i_j ((size_t)sqrt(db_mats_in_acc))
-// #define db_max_tile_k (db_mats_in_partition / db_max_tile_i_j)
-
-//     // GEMMINI는 한 타일이 DIM(=16) 배수여야 하므로 논리 크기를 DIM에 맞춰 패딩
-//     const size_t dim_I_padded = (dim_I / DIM + (dim_I % DIM != 0)) * DIM;
-//     const size_t dim_J_padded = (dim_J / DIM + (dim_J % DIM != 0)) * DIM;
-//     const size_t dim_K_padded = (dim_K / DIM + (dim_K % DIM != 0)) * DIM;
-
-//     // WS 모드에서는 스크래치패드와 ACC를 두 세트로 나눠 번갈아 쓰기 때문에 최대 사용량이 절반으로 감소
-//     const bool double_buffered = tiled_matmul_type == WS;
-
-//     // auto tiler가 탐색할 최대 scratchpad/ACC 행 수를 미리 계산
-//     const size_t max_spad_rows = double_buffered ? BANK_NUM * BANK_ROWS / 2 : BANK_NUM * BANK_ROWS;
-//     const size_t max_acc_rows = double_buffered ? ACC_ROWS / 2 : ACC_ROWS;
-
-//     // tile_I/tile_J/tile_K는 DIM 단위 매트릭스 개수(행렬 블록 수)
-//     size_t tile_I, tile_J, tile_K;
-
-//     if (act == LAYERNORM || act == SOFTMAX)
-//     {
-//       // 레이어정규화·소프트맥스는 누산 버퍼 전체에 한 행이 상주해야 하므로 I=1, K=1로 강제
-//       tile_I = 1;
-//       tile_J = dim_J_padded / DIM;
-//       tile_K = 1;
-//     }
-//     else if (double_buffered)
-//     {
-//       // WS 모드: scratchpad/ACC 용량이 절반이므로 db_* 상수로 계산한 최대치와 실제 필요량 중 작은 값을 선택
-//       tile_I = dim_I_padded / DIM < db_max_tile_i_j ? dim_I_padded / DIM : db_max_tile_i_j;
-//       tile_J = dim_J_padded / DIM < db_max_tile_i_j ? dim_J_padded / DIM : db_max_tile_i_j;
-//       tile_K = dim_K_padded / DIM < db_max_tile_k ? dim_K_padded / DIM : db_max_tile_k;
-//     }
-//     else
-//     {
-//       // OS 모드: 전체 scratchpad/ACC를 쓸 수 있으니 기본 max_* 한도와 비교
-//       tile_I = dim_I_padded / DIM < max_tile_i_j ? dim_I_padded / DIM : max_tile_i_j;
-//       tile_J = dim_J_padded / DIM < max_tile_i_j ? dim_J_padded / DIM : max_tile_i_j;
-//       tile_K = dim_K_padded / DIM < max_tile_k ? dim_K_padded / DIM : max_tile_k;
-//     }
-
-//     // Fill scratchpad as much as possible
-//     while (true)
-//     {
-//       bool increased = false;
-
-//       // J 타일을 한 칸 늘렸을 때 scratchpad/ACC 제약을 넘지 않고 실제 행렬도 수용 가능하면 확장
-//       if (tiled_matmul_total_spad_rows(tile_I, tile_J + 1, tile_K) <= max_spad_rows &&
-//           tiled_matmul_total_acc_rows(tile_I, tile_J + 1) <= max_acc_rows &&
-//           (tile_J + 1) * DIM <= dim_J_padded)
-//       {
-//         tile_J++;
-//         increased = true;
-//       }
-
-//       // I 타일 확장: scratchpad에는 A, ACC에는 C가 늘어나므로 두 조건을 모두 만족해야 함
-//       if (tiled_matmul_total_spad_rows(tile_I + 1, tile_J, tile_K) <= max_spad_rows &&
-//           tiled_matmul_total_acc_rows(tile_I + 1, tile_J) <= max_acc_rows &&
-//           (tile_I + 1) * DIM <= dim_I_padded)
-//       {
-//         tile_I++;
-//         increased = true;
-//       }
-
-//       // K 타일 확장: scratchpad만 추가로 필요하므로 accumulator 조건은 확인하지 않음
-//       if (tiled_matmul_total_spad_rows(tile_I, tile_J, tile_K + 1) <= max_spad_rows &&
-//           (tile_K + 1) * DIM <= dim_K_padded)
-//       {
-//         tile_K++;
-//         increased = true;
-//       }
-
-//       if (!increased)
-//         break;
-//     }
-
-//     // tile size 디버깅
-//     gemmini_log_debug_layer(layer, "[tiled_matmul_auto_fp32] dim=(%zu,%zu,%zu) tiles=(%zu,%zu,%zu)",
-//                    dim_I, dim_J, dim_K, tile_I, tile_J, tile_K);
-
     const bool cpu_fallback = tiled_matmul_type == CPU;
-
-    // Gemmini 경로(full_C=true)와 CPU 폴백 모두 int32(acc_t) 누산 버퍼를 사용한다.
-    static thread_local std::vector<acc_t> c_acc32;
-    c_acc32.resize(dim_I * dim_J);
-    acc_t *acc_ptr32 = c_acc32.data();
-    void *acc_ptr = static_cast<void *>(acc_ptr32);
-
-    // 블록별로 float 결과를 누적할 때 편하게 더해 줄 수 있도록 fp32 출력 버퍼를 미리 0으로 클리어
-    float *f_out = args->f_out;
-    const size_t stride_f_out = args->stride_f_out;
-    const size_t col_stride_f_out = args->col_stride_f_out ? args->col_stride_f_out : 1;
-    if (f_out != nullptr)
-    {
-      for (size_t i = 0; i < dim_I; ++i)
-      {
-        float *row_ptr = f_out + i * stride_f_out;
-        for (size_t j = 0; j < dim_J; ++j)
-          row_ptr[j * col_stride_f_out] = 0.0f;
-      }
-    }
-
-    const size_t weight_block_k = args->block_size_k > 0
-                                      ? static_cast<size_t>(args->block_size_k)
-                                      : static_cast<size_t>(QK8_0);
-    const size_t group_size_k = std::max<size_t>(1, weight_block_k);
-    const size_t group_size_aligned = std::max<size_t>(16, ((group_size_k + DIM - 1) / DIM) * DIM);
-    const size_t group_tile_cap = std::max<size_t>(1, group_size_aligned / DIM);
-    tile_K = std::min(tile_K, group_tile_cap);
-    const size_t max_block_elems = tile_K * DIM;
-
-    static thread_local std::vector<elem_t> a_stage;
-    static thread_local std::vector<elem_t> b_stage;
-
-    size_t k_offset = 0;
-    bool first_block = true;
-    size_t processed_k = 0;
-    size_t k_block_count = 0;
-
-    while (k_offset < dim_K)
-    {
-      const size_t remaining_k = dim_K - k_offset;
-      size_t logical_block_K = std::min(remaining_k, max_block_elems);
-      const size_t off_in_group = k_offset % group_size_k;
-      const size_t to_group_boundary = group_size_k - off_in_group;
-      const size_t off_in_weight_block = k_offset % weight_block_k;
-      const size_t to_weight_boundary = weight_block_k - off_in_weight_block;
-
-      logical_block_K = std::min(logical_block_K, std::min(to_group_boundary, to_weight_boundary));
-      const size_t aligned_block_K = ((logical_block_K + DIM - 1) / DIM) * DIM;
-      const size_t bloctile_ks = std::max<size_t>(1, aligned_block_K / DIM);
-      const size_t bloctile_k_K = std::max<size_t>(1, std::min(tile_K, bloctile_ks));
-
-      // gemmini_log_debug(layer, "[k-block] idx=%zu k_off=%zu block_K=%zu bloctile_k_K=%zu",
-      //                k_block_count, k_offset, logical_block_K, bloctile_k_K);
-
-      processed_k += logical_block_K;
-      ++k_block_count;
-
-      // 새 누적 시작
-      std::fill(c_acc32.begin(), c_acc32.end(), 0);
-
-      const bool needs_k_padding = aligned_block_K != logical_block_K;
-      const elem_t *A_block = nullptr;
-      const elem_t *B_block = nullptr;
-      size_t block_stride_A = args->sA;
-      size_t block_stride_B = args->sB;
-      size_t gemmini_block_K = logical_block_K;
-
-      if (needs_k_padding)
-      {
-        block_stride_A = args->transpose_A ? dim_I : aligned_block_K;
-        const size_t a_rows = args->transpose_A ? aligned_block_K : dim_I;
-        a_stage.assign(a_rows * block_stride_A, 0);
-
-        if (!args->transpose_A)
-        {
-          for (size_t i = 0; i < dim_I; ++i)
-          {
-            for (size_t kk = 0; kk < logical_block_K; ++kk)
-            {
-              a_stage[i * block_stride_A + kk] = args->A[i * args->sA + (k_offset + kk)];
-            }
-          }
-        }
-        else
-        {
-          for (size_t kk = 0; kk < logical_block_K; ++kk)
-          {
-            for (size_t i = 0; i < dim_I; ++i)
-            {
-              a_stage[kk * block_stride_A + i] = args->A[(k_offset + kk) * args->sA + i];
-            }
-          }
-        }
-
-        if (!args->transpose_B)
-        {
-          block_stride_B = dim_J;
-          b_stage.assign(aligned_block_K * block_stride_B, 0);
-          for (size_t kk = 0; kk < logical_block_K; ++kk)
-          {
-            for (size_t j = 0; j < dim_J; ++j)
-            {
-              b_stage[kk * block_stride_B + j] = args->B[(k_offset + kk) * args->sB + j];
-            }
-          }
-        }
-        else
-        {
-          block_stride_B = aligned_block_K;
-          b_stage.assign(dim_J * block_stride_B, 0);
-          for (size_t j = 0; j < dim_J; ++j)
-          {
-            for (size_t kk = 0; kk < logical_block_K; ++kk)
-            {
-              b_stage[j * block_stride_B + kk] = args->B[j * args->sB + (k_offset + kk)];
-            }
-          }
-        }
-
-        A_block = a_stage.data();
-        B_block = b_stage.data();
-        gemmini_block_K = aligned_block_K;
-      }
-      else
-      {
-        A_block = args->A + k_offset;
-        // JxK row-major (transpose_B=true): advance by column offset (k_offset).
-        // KxJ row-major (transpose_B=false): advance by row offset (k_offset * sB).
-        B_block = args->transpose_B
-                      ? (args->B + k_offset)
-                      : (args->B + k_offset * args->sB);
-      }
-
-      const void *D_block = first_block ? args->D : nullptr;
-      args->gemmini_call_k_logical = logical_block_K;
-      args->gemmini_call_k_aligned = gemmini_block_K;
-      args->gemmini_call_tile_k_elems = bloctile_k_K * DIM;
-
-#if GEMMINI_WS_DEBUG
-      gemmini_log_debug_layer(
-          layer,
-          "[k-block.call] idx=%zu k_off=%zu logical=%zu aligned=%zu tileK=%zu first=%d "
-          "ptr=(A:%p,B:%p,D:%p) stride=(A:%zu,B:%zu) type=%d",
-          k_block_count - 1, k_offset, logical_block_K, gemmini_block_K, bloctile_k_K,
-          first_block ? 1 : 0,
-          (const void *)A_block, (const void *)B_block, D_block,
-          block_stride_A, block_stride_B,
-          static_cast<int>(tiled_matmul_type));
-#endif
-
-      uint64_t end = ggml::gemmini::cycle::read();
-      gemmini_log_cycle(layer, "[tiled_matmul_auto_fp32] cpu.Setting tile dividing by group-size", start, end);
 
       start = ggml::gemmini::cycle::read();
       // auto tiling으로 선정된 K 타일을 block에 매칭하여 bloctile_k_K를 사용해 호출
-      if (cpu_fallback)
+      /* if (cpu_fallback)
       {
-        tiled_matmul_int32(dim_I, dim_J, gemmini_block_K,
+        matmul_cpu_fp(dim_I, dim_J, dim_K,
                            A_block, B_block, D_block, acc_ptr,
                            block_stride_A, block_stride_B, args->sD, dim_J,
                            1.0f, 1.0f, args->scale_D,
@@ -2301,7 +1982,7 @@ namespace ggml { namespace gemmini {
       }
       else
       {
-        tiled_matmul(dim_I, dim_J, gemmini_block_K,
+        tiled_matmul(dim_I, dim_J, dim_K,
                      A_block, B_block, D_block, acc_ptr,
                      block_stride_A, block_stride_B, args->sD, dim_J,
                      1.0f, 1.0f, args->scale_D,
@@ -2311,37 +1992,9 @@ namespace ggml { namespace gemmini {
                      args->full_C, args->low_D,
                      args->weightA,
                      tiled_matmul_type);
-      }
-      end = ggml::gemmini::cycle::read();
+      } */
+      uint64_t end = ggml::gemmini::cycle::read();
       gemmini_log_cycle(layer, "[tiled_matmul_auto_fp32] npu.Gemmini HW tiled_matmul", start, end);
-
-#if GEMMINI_WS_DEBUG
-      gemmini_log_debug_layer(layer, "[k-block.done] idx=%zu k_off=%zu", k_block_count - 1, k_offset);
-#endif
-
-      start = ggml::gemmini::cycle::read();
-      // Gemmini의 int32(acc_t) 결과를 float로 dequantize
-      if (f_out != nullptr)
-      {
-        GGML_ASSERT(act == NO_ACTIVATION);
-        ggml::gemmini::dequantize(*args,
-                                                   k_offset,
-                                                   logical_block_K,
-                                                   reinterpret_cast<const int32_t *>(acc_ptr32),
-                                                   dim_J);
-      }
-      end = ggml::gemmini::cycle::read();
-      gemmini_log_cycle(layer, "[tiled_matmul_auto_fp32] cpu.Dequantize output to fp32", start, end);
-
-      k_offset += logical_block_K;
-      first_block = false;
-    }
-
-    GGML_ASSERT(processed_k == dim_K);
-#if GEMMINI_KBLOCK_DEBUG
-    gemmini_log_debug_layer(layer, "[k-block.summary] blocks=%zu processed_K=%zu dim_K=%zu",
-                   k_block_count, processed_k, dim_K);
-#endif
 
 #ifdef PRINT_TILE
 #if PRINT_TILE
