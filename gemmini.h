@@ -1855,13 +1855,13 @@ namespace ggml { namespace gemmini {
               tile_k, tile_k + tile_k_actual, tile_k_padded,
               tile_k / block_size_k, (tile_k + tile_k_actual + block_size_k - 1) / block_size_k,
               tile_k_padded - tile_k_actual,
-              static_cast<int>(args->activation_e_s),
-              static_cast<int>(args->activation_m),
+              static_cast<int>(args->act_quant.ethos.e_s),
+              static_cast<int>(args->act_quant.ethos.m),
               0);
         }
 
         const int16_t tile_activation_e_s = args->resolve_stripe_activation_e_s(tile_row_idx);
-        const float activation_scale = gemmini_detail::apply_activation_exponent(1.0f, tile_activation_e_s, args->activation_m);
+        const float activation_scale = gemmini_detail::apply_activation_exponent(1.0f, tile_activation_e_s, args->act_quant.ethos.m);
         const ggml::gemmini::quants::Stripe output_stripe(tile_i_actual, tile_j_actual, tile_i, tile_j);
         float *stripe_out = args->f_out + tile_i * out_row_stride + tile_j * out_col_stride;
 
