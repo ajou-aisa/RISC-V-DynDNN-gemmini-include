@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "gemmini_params.h"
@@ -1221,7 +1222,7 @@ namespace ggml { namespace gemmini {
     }
   }
 
-  // INT8 matmul fallback. Kepp output INT32
+  // INT8 matmul fallback. Keep output INT32
   static void matmul_cpu_int32(bool transA, bool transB, size_t DIM_I, size_t DIM_J, size_t DIM_K,
                                const elem_t *A, const elem_t *B, const acc_t *D,
                                void *C,
@@ -1366,7 +1367,7 @@ namespace ggml { namespace gemmini {
       }
     }
   }
-}} // namespace ggml::gemmini
+}}
 
 #undef GEMMINI_SCALE
 
@@ -1491,41 +1492,45 @@ static void tiled_matmul(size_t dim_I, size_t dim_J, size_t dim_K,
 }
 
 namespace ggml { namespace gemmini {
-  // tiled_matmul을 참고하여, fp 텐서를 입력받아 처리하도록 구현.
   // TODO: 김동현
-  void tiled_matmul_outer_fp(){
-    
+  // tiled_matmul을 참고하여, fp 텐서를 입력받아 처리하도록 구현.
+  static void tiled_matmul_outer_fp(size_t dim_I, size_t dim_J, size_t dim_K,
+        const float* A, const float* B,
+        const float* D, float* C,
+        size_t stride_A, size_t stride_B, size_t stride_D, size_t stride_C,
+        size_t tile_I, size_t tile_J, size_t tile_K,
+        bool transpose_A, bool transpose_B,
+        enum tiled_matmul_type_t tiled_matmul_type) {
+    (void) dim_I; (void) dim_J; (void) dim_K;
+    (void) A; (void) B; (void) D; (void) C;
+    (void) stride_A; (void) stride_B; (void) stride_D; (void) stride_C;
+    (void) tile_I; (void) tile_J; (void) tile_K;
+    (void) transpose_A; (void) transpose_B; (void) tiled_matmul_type;
   }
 
   // tiled matrix mulctiplication fp x fp
-  // TODO: 김동현
-  void tiled_matmul_fp() {
-
-    // Run a tiled matrix multiplication on either Gemmini or the CPU
-    /* if (tiled_matmul_type == OS || tiled_matmul_type == WS)
-    {
-      tiled_matmul_outer(dim_I, dim_J, dim_K,
-                         A, B, D, C,
-                         stride_A, stride_B, stride_D, stride_C,
-                         A_scale_factor, B_scale_factor, D_scale_factor,
-                         tile_I, tile_J, tile_K,
-                         act, scale, bert_scale, repeating_bias,
-                         transpose_A, transpose_B,
-                         full_C, low_D,
-                         weightA,
-                         (int)tiled_matmul_type);
+  static void tiled_matmul_fp(size_t dim_I, size_t dim_J, size_t dim_K,
+        const float* A, const float* B,
+        const float* D, float* C,
+        size_t stride_A, size_t stride_B, size_t stride_D, size_t stride_C,
+        size_t tile_I, size_t tile_J, size_t tile_K,
+        bool transpose_A, bool transpose_B,
+        enum tiled_matmul_type_t tiled_matmul_type) {
+    if (tiled_matmul_type == OS || tiled_matmul_type == WS) {
+      tiled_matmul_outer_fp(dim_I, dim_J, dim_K,
+          A, B, D, C,
+          stride_A, stride_B, stride_D, stride_C,
+          tile_I, tile_J, tile_K,
+          transpose_A, transpose_B,
+          tiled_matmul_type);
+    } else {
+      matmul_cpu_fp(transpose_A, transpose_B, dim_I, dim_J, dim_K,
+          A, B, D, C,
+          stride_A, stride_B, stride_D, stride_C);
     }
-    else if (tiled_matmul_type == CPU)
-    {
-      matmul_cpu(transpose_A, transpose_B, dim_I, dim_J, dim_K,
-                 A, B, (const acc_t *)D, (elem_t *)C,
-                 stride_A, stride_B, stride_D, stride_C,
-                 A_scale_factor, B_scale_factor, D_scale_factor,
-                 act, scale, bert_scale, repeating_bias);
-    } */
   }
-}
-}
+
+}}
 
 static size_t tiled_matmul_total_spad_rows(size_t I, size_t J, size_t K) {
   return (I * K + K * J) * DIM;
@@ -1537,6 +1542,82 @@ static size_t tiled_matmul_total_acc_rows(size_t I, size_t J) {
 }
 
 namespace ggml { namespace gemmini {
+  // fp x fp gemmini. baseline system
+  // TODO: 김동현
+  static void tiled_matmul_auto_fp(struct ggml_gemmini_args_t *args)
+  {
+    const char *layer = ggml::gemmini::types::to_string(args->layer_type);
+
+    // tile size와 block size 매칭을 통해, tiled별 연산 결과를 dequantize해서 llama.cpp의 output으로 전달
+    uint64_t start = ggml::gemmini::cycle::read();
+    if (args == NULL)
+      return;
+
+    const size_t dim_I = args->I;
+    const size_t dim_J = args->J;
+    const size_t dim_K = args->K;
+
+    const enum tiled_matmul_type_t tiled_matmul_type = args->tiled_matmul_type;
+    const int act = args->act;
+
+    size_t tile_I = args->tile_I;
+    size_t tile_J = args->tile_J;
+    size_t tile_K = args->tile_K;
+
+    const bool cpu_fallback = tiled_matmul_type == CPU;
+
+      start = ggml::gemmini::cycle::read();
+      // auto tiling으로 선정된 K 타일을 block에 매칭하여 bloctile_k_K를 사용해 호출
+      /* if (cpu_fallback)
+      {
+        matmul_cpu_fp(dim_I, dim_J, dim_K,
+                           A_block, B_block, D_block, acc_ptr,
+                           block_stride_A, block_stride_B, args->sD, dim_J,
+                           1.0f, 1.0f, args->scale_D,
+                           act, args->scale, args->bert_scale, args->repeating_bias,
+                           tile_I, tile_J, bloctile_k_K,
+                           args->transpose_A, args->transpose_B,
+                           true, args->low_D,
+                           args->weightA,
+                           tiled_matmul_type);
+      }
+      else
+      {
+        tiled_matmul(dim_I, dim_J, dim_K,
+                     A_block, B_block, D_block, acc_ptr,
+                     block_stride_A, block_stride_B, args->sD, dim_J,
+                     1.0f, 1.0f, args->scale_D,
+                     act, args->scale, args->bert_scale, args->repeating_bias,
+                     tile_I, tile_J, bloctile_k_K,
+                     args->transpose_A, args->transpose_B,
+                     args->full_C, args->low_D,
+                     args->weightA,
+                     tiled_matmul_type);
+      } */
+      uint64_t end = ggml::gemmini::cycle::read();
+      gemmini_log_cycle(layer, "[tiled_matmul_auto_fp32] npu.Gemmini HW tiled_matmul", start, end);
+
+#ifdef PRINT_TILE
+#if PRINT_TILE
+    const int spad_rows = tiled_matmul_total_spad_rows(tile_I, tile_J, tile_K);
+    const int acc_rows = tiled_matmul_total_acc_rows(tile_I, tile_J);
+
+    printf("tile_I: %d\n", tile_I);
+    printf("tile_J: %d\n", tile_J);
+    printf("tile_K: %d\n\n", tile_K);
+
+    printf("spad_rows: %d\n", spad_rows);
+    printf("acc_rows: %d\n\n", acc_rows);
+
+    printf("spad_row utilization: %d%%\n", (spad_rows * 100) / max_spad_rows);
+    printf("acc_row utilization: %d%%\n\n", (acc_rows * 100) / max_acc_rows);
+
+    exit(EXIT_SUCCESS);
+#endif
+#endif
+
+  }
+
   namespace gemmini_detail {
     static inline float apply_activation_exponent(float value, int16_t e_t, int16_t m)
     {
@@ -1757,6 +1838,10 @@ namespace ggml { namespace gemmini {
       {
         const size_t tile_j_actual = std::min(tile_J * DIM, dim_J - tile_j);
         const size_t stripe_col_idx = tile_j / (tile_J * DIM);
+        const auto *activation_meta = std::get_if<ggml::gemmini::quants::act::exsia::Meta>(&args->act_quant.storage());
+        const int16_t activation_e_s = activation_meta ? activation_meta->e_s : 0;
+        const int16_t activation_rho = activation_meta ? activation_meta->rho : 0;
+
         gemmini_log_debug_layer(layer,
             "[preload] weight stripe: tile_j=%zu tile_j_actual=%zu stripe_col=%zu stripe_J=%zu use_stripe=%s",
             tile_j, tile_j_actual, stripe_col_idx, stripe_J,
@@ -1850,18 +1935,18 @@ namespace ggml { namespace gemmini {
           }
 
           gemmini_log_debug_layer(layer,
-              "[tiled_block_matmul_auto] iter I=[%zu:%zu) J=[%zu:%zu) K=[%zu:%zu) K_pad=%zu blk=[%zu:%zu) pad=%zu e_t=%d m=%d q=%d",
+               "[tiled_block_matmul_auto] iter I=[%zu:%zu) J=[%zu:%zu) K=[%zu:%zu) K_pad=%zu blk=[%zu:%zu) pad=%zu e_t=%d rho=%d q=%d",
               tile_i, tile_i + tile_i_actual, tile_j, tile_j + tile_j_actual,
               tile_k, tile_k + tile_k_actual, tile_k_padded,
               tile_k / block_size_k, (tile_k + tile_k_actual + block_size_k - 1) / block_size_k,
               tile_k_padded - tile_k_actual,
-              static_cast<int>(args->act_quant.ethos.e_s),
-              static_cast<int>(args->act_quant.ethos.m),
+              static_cast<int>(activation_e_s),
+               static_cast<int>(activation_rho),
               0);
         }
 
-        const int16_t tile_activation_e_s = args->resolve_stripe_activation_e_s(tile_row_idx);
-        const float activation_scale = gemmini_detail::apply_activation_exponent(1.0f, tile_activation_e_s, args->act_quant.ethos.m);
+        const int16_t tile_activation_e_s = activation_meta ? activation_meta->resolve_stripe_theta(tile_row_idx) : 0;
+        const float activation_scale = gemmini_detail::apply_activation_exponent(1.0f, tile_activation_e_s, 0);
         const ggml::gemmini::quants::Stripe output_stripe(tile_i_actual, tile_j_actual, tile_i, tile_j);
         float *stripe_out = args->f_out + tile_i * out_row_stride + tile_j * out_col_stride;
 
@@ -1939,88 +2024,7 @@ namespace ggml { namespace gemmini {
 
     // TODO: call gemmini & dequantize.
   }
-}} // namespace ggml::gemmini
-namespace ggml { namespace gemmini {
-  // fp x fp gemmini. baseline system
-  // TODO: 김동현
-  static void tiled_matmul_auto_fp(struct ggml_gemmini_args_t *args)
-  {
-    const char *layer = ggml::gemmini::types::to_string(args->layer_type);
 
-    // tile size와 block size 매칭을 통해, tiled별 연산 결과를 dequantize해서 llama.cpp의 output으로 전달
-    uint64_t start = ggml::gemmini::cycle::read();
-    if (args == NULL)
-      return;
-
-    const size_t dim_I = args->I;
-    const size_t dim_J = args->J;
-    const size_t dim_K = args->K;
-
-    const enum tiled_matmul_type_t tiled_matmul_type = args->tiled_matmul_type;
-    const int act = args->act;
-
-    size_t tile_I = args->tile_I;
-    size_t tile_J = args->tile_J;
-    size_t tile_K = args->tile_K;
-
-    const bool cpu_fallback = tiled_matmul_type == CPU;
-
-      start = ggml::gemmini::cycle::read();
-      // auto tiling으로 선정된 K 타일을 block에 매칭하여 bloctile_k_K를 사용해 호출
-      /* if (cpu_fallback)
-      {
-        matmul_cpu_fp(dim_I, dim_J, dim_K,
-                           A_block, B_block, D_block, acc_ptr,
-                           block_stride_A, block_stride_B, args->sD, dim_J,
-                           1.0f, 1.0f, args->scale_D,
-                           act, args->scale, args->bert_scale, args->repeating_bias,
-                           tile_I, tile_J, bloctile_k_K,
-                           args->transpose_A, args->transpose_B,
-                           true, args->low_D,
-                           args->weightA,
-                           tiled_matmul_type);
-      }
-      else
-      {
-        tiled_matmul(dim_I, dim_J, dim_K,
-                     A_block, B_block, D_block, acc_ptr,
-                     block_stride_A, block_stride_B, args->sD, dim_J,
-                     1.0f, 1.0f, args->scale_D,
-                     act, args->scale, args->bert_scale, args->repeating_bias,
-                     tile_I, tile_J, bloctile_k_K,
-                     args->transpose_A, args->transpose_B,
-                     args->full_C, args->low_D,
-                     args->weightA,
-                     tiled_matmul_type);
-      } */
-      uint64_t end = ggml::gemmini::cycle::read();
-      gemmini_log_cycle(layer, "[tiled_matmul_auto_fp32] npu.Gemmini HW tiled_matmul", start, end);
-
-#ifdef PRINT_TILE
-#if PRINT_TILE
-    const int spad_rows = tiled_matmul_total_spad_rows(tile_I, tile_J, tile_K);
-    const int acc_rows = tiled_matmul_total_acc_rows(tile_I, tile_J);
-
-    printf("tile_I: %d\n", tile_I);
-    printf("tile_J: %d\n", tile_J);
-    printf("tile_K: %d\n\n", tile_K);
-
-    printf("spad_rows: %d\n", spad_rows);
-    printf("acc_rows: %d\n\n", acc_rows);
-
-    printf("spad_row utilization: %d%%\n", (spad_rows * 100) / max_spad_rows);
-    printf("acc_row utilization: %d%%\n\n", (acc_rows * 100) / max_acc_rows);
-
-    exit(EXIT_SUCCESS);
-#endif
-#endif
-
-#undef partition_rows
-#undef mats_in_partition
-#undef mats_in_acc
-#undef max_tile_i_j
-#undef max_tile_k
-  }
 }} // namespace ggml::gemmini
 
 // This function runs a tiled matrix multiplication, with automatically
