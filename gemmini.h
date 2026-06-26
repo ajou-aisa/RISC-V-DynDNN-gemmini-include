@@ -1916,8 +1916,7 @@ namespace ggml { namespace gemmini {
                    dim_I, dim_J, dim_K, tile_I, tile_J, tile_K);
   }
 
-  // IM2P WS simulation. target system.
-  static void tiled_matmul_auto_im2p(struct ggml_gemmini_args_t *args) {
+  static void tiled_matmul_im2p_impl(struct ggml_gemmini_args_t *args, bool use_cpu_dot, const char *cycle_label) {
     if (args == NULL)
       return;
 
@@ -1925,26 +1924,17 @@ namespace ggml { namespace gemmini {
     // tile size와 block size 매칭을 통해, tiled별 연산 결과를 dequantize해서 llama.cpp의 output으로 전달
     uint64_t start = ggml::gemmini::cycle::read();
 
-    if (args->tiled_matmul_type != CPU)
-    {
-      gemmini_log_debug_layer(layer, "[tiled_matmul_auto_im2p] only CPU mode is implemented");
-      return;
-    }
-
-    const bool dense_i8_scalar = args->weight_i8_scale_active;
     if (args->A == nullptr || args->B == nullptr || args->f_out == nullptr ||
-        (!dense_i8_scalar && args->c_b == nullptr))
+        args->c_b == nullptr)
       return;
 
-    // Q8_0_R requires block/stripe scale metadata. Dense I8 uses one scalar
-    // weight scale, so it intentionally has no c_b/s_rf/R arrays.
-    const size_t stripe_J_check = dense_i8_scalar ? 1 : args->stripe_J_or_rowwise_elems();
-    if (!dense_i8_scalar && stripe_J_check > 1)
+    const size_t stripe_J_check = args->stripe_J_or_rowwise_elems();
+    if (stripe_J_check > 1)
     {
       if (args->s_rf_stripe == nullptr || args->R_stripe == nullptr)
         return;
     }
-    else if (!dense_i8_scalar)
+    else
     {
       if (args->s_rf == nullptr || args->R == nullptr)
         return;
@@ -1956,7 +1946,7 @@ namespace ggml { namespace gemmini {
     const size_t dim_I = args->I;
     const size_t dim_J = args->J;
     const size_t dim_K = args->K;
-    if (dim_I == 0 || dim_J == 0 || dim_K == 0 || (!dense_i8_scalar && args->blocks_per_row == 0))
+    if (dim_I == 0 || dim_J == 0 || dim_K == 0 || args->blocks_per_row == 0)
       return;
 
     GGML_ASSERT(args->act == NO_ACTIVATION);
@@ -1972,9 +1962,9 @@ namespace ggml { namespace gemmini {
     const size_t tile_K = args->tile_K;
     const size_t out_row_stride = args->stride_f_out ? args->stride_f_out : dim_J;
     const size_t out_col_stride = args->col_stride_f_out ? args->col_stride_f_out : 1;
-    const size_t scale_rows = dense_i8_scalar ? dim_J : (args->blocks_J > 0 ? args->blocks_J : dim_J);
-    const size_t stripe_J = dense_i8_scalar ? 1 : args->stripe_J_or_rowwise_elems();
-    const bool use_stripe_scales = !dense_i8_scalar && (stripe_J > 1) && (args->s_rf_stripe != nullptr) && (args->R_stripe != nullptr);
+    const size_t scale_rows = args->blocks_J > 0 ? args->blocks_J : dim_J;
+    const size_t stripe_J = args->stripe_J_or_rowwise_elems();
+    const bool use_stripe_scales = (stripe_J > 1) && (args->s_rf_stripe != nullptr) && (args->R_stripe != nullptr);
 
     for (size_t i = 0; i < dim_I; ++i)
     {
@@ -1996,8 +1986,8 @@ namespace ggml { namespace gemmini {
     const size_t num_tile_ks = (dim_K + tile_K * DIM - 1) / (tile_K * DIM);
 
     gemmini_log_debug_layer(layer,
-        "[tiled_block_matmul_auto] dim=(I=%zu,J=%zu,K=%zu) tile_size: A=(I=%zu x K=%zu) B=(J=%zu x K=%zu) | num_tiles: I=%zu J=%zu K=%zu blocks_per_row=%zu stripe_J=%zu dense_i8=%s",
-        dim_I, dim_J, dim_K, tile_I * DIM, tile_K * DIM, tile_J * DIM, tile_K * DIM, num_i_tiles, num_j_tiles, num_tile_ks, args->blocks_per_row, stripe_J, dense_i8_scalar ? "1" : "0");
+        "[tiled_block_matmul_auto] dim=(I=%zu,J=%zu,K=%zu) tile_size: A=(I=%zu x K=%zu) B=(J=%zu x K=%zu) | num_tiles: I=%zu J=%zu K=%zu blocks_per_row=%zu stripe_J=%zu",
+        dim_I, dim_J, dim_K, tile_I * DIM, tile_K * DIM, tile_J * DIM, tile_K * DIM, num_i_tiles, num_j_tiles, num_tile_ks, args->blocks_per_row, stripe_J);
 
     static thread_local std::vector<elem_t> a_tile;
     static thread_local std::vector<int64_t> acc32;
@@ -2063,7 +2053,7 @@ namespace ggml { namespace gemmini {
             const size_t k_in_weight_block = global_k % block_size_k;
             const size_t block_k_actual = std::min(block_size_k - k_in_weight_block, tile_k_actual - k_block);
             const size_t weight_blk = global_k / block_size_k;
-	            if (!dense_i8_scalar && weight_blk >= args->blocks_per_row)
+            if (weight_blk >= args->blocks_per_row)
 	            {
 	              k_block += block_k_actual;
 	              continue;
@@ -2082,24 +2072,32 @@ namespace ggml { namespace gemmini {
 
 	                const elem_t *b_block = B + global_j * row_stride_B + global_k;
 	                int32_t block_dot = 0;
-	                for (size_t kk = 0; kk < block_k_actual; ++kk)
-	                  block_dot += static_cast<int32_t>(a_row[kk]) * static_cast<int32_t>(b_block[kk]);
+	                if (use_cpu_dot)
+	                {
+	                  acc_t block_dot_acc = 0;
+	                  matmul_cpu_int32(false, false, 1, 1, block_k_actual,
+	                      a_row, b_block, nullptr, &block_dot_acc,
+	                      block_k_actual, 1, 0, 1,
+	                      1, 1, 1,
+	                      NO_ACTIVATION, 0, 0, false, true);
+	                  block_dot = static_cast<int32_t>(block_dot_acc);
+	                }
+	                else
+	                {
+	                  for (size_t kk = 0; kk < block_k_actual; ++kk)
+	                    block_dot += static_cast<int32_t>(a_row[kk]) * static_cast<int32_t>(b_block[kk]);
+	                }
 
 	                const int64_t acc_before = acc_row[j];
-	                uint64_t c_eff = 1;
-	                if (!dense_i8_scalar)
-	                {
-	                  const size_t scale_idx = global_j * args->blocks_per_row + weight_blk;
-	                  c_eff = static_cast<uint64_t>(static_cast<uint16_t>(args->c_b[scale_idx])) +
-	                      (use_stripe_scales
-	                          ? static_cast<uint64_t>(args->R_stripe[global_j / stripe_J])
-	                          : static_cast<uint64_t>(args->R[global_j]));
-	                }
+	                const size_t scale_idx = global_j * args->blocks_per_row + weight_blk;
+	                const uint64_t c_eff = static_cast<uint64_t>(static_cast<uint16_t>(args->c_b[scale_idx])) +
+	                    (use_stripe_scales
+	                        ? static_cast<uint64_t>(args->R_stripe[global_j / stripe_J])
+	                        : static_cast<uint64_t>(args->R[global_j]));
 	                acc_row[j] += static_cast<int64_t>(block_dot) * static_cast<int64_t>(c_eff);
 
-	                if (!dense_i8_scalar && i == 0 && j == 0)
+	                if (i == 0 && j == 0)
 	                {
-	                    const size_t scale_idx = global_j * args->blocks_per_row + weight_blk;
 	                    gemmini_log_debug_layer(layer,
 	                        "[tiled_block_matmul_auto] block-dequant i=%zu j=%zu k=%zu weight_blk=%zu "
                         "dot=%d c_b=%u R=%u c_eff=%llu acc_before=%ld acc_after=%ld stripe=%s",
@@ -2134,7 +2132,7 @@ namespace ggml { namespace gemmini {
         const ggml::gemmini::quants::Stripe output_stripe(tile_i_actual, tile_j_actual, tile_i, tile_j);
         float *stripe_out = args->f_out + tile_i * out_row_stride + tile_j * out_col_stride;
 
-	        if (!dense_i8_scalar && tile_i_actual > 0 && tile_j_actual > 0 && tile_j < scale_rows)
+	        if (tile_i_actual > 0 && tile_j_actual > 0 && tile_j < scale_rows)
 	        {
           const float s_rf_val = use_stripe_scales ? args->s_rf_stripe[stripe_col_idx] : args->s_rf[tile_j];
           const float acc_fp = static_cast<float>(static_cast<double>(acc32[0]) * static_cast<double>(s_rf_val));
@@ -2152,19 +2150,7 @@ namespace ggml { namespace gemmini {
               use_stripe_scales ? "1" : "0");
         }
 
-	        if (dense_i8_scalar)
-	        {
-	          ggml::gemmini::update_q80_r_output_impl(
-	              output_stripe,
-	              acc32.data(),
-	              tile_j_actual,
-	              [weight_scale = args->weight_scale](size_t) { return weight_scale; },
-	              activation_scale,
-	              stripe_out,
-	              out_row_stride,
-	              out_col_stride);
-	        }
-	        else if (use_stripe_scales)
+	        if (use_stripe_scales)
 	        {
           ggml::gemmini::update_q80_r_output_impl(
               output_stripe,
@@ -2192,10 +2178,166 @@ namespace ggml { namespace gemmini {
     }
 
     uint64_t end = ggml::gemmini::cycle::read();
-    gemmini_log_cycle(layer, "[tiled_block_matmul_auto] cpu.Q8_0_R tiled matmul", start, end);
+    gemmini_log_cycle(layer, cycle_label, start, end);
+  }
+
+  static void tiled_matmul_im2p_sw(struct ggml_gemmini_args_t *args) {
+    tiled_matmul_im2p_impl(args, true, "[tiled_matmul_auto_im2p] cpu.Q8_0_R tiled matmul");
+  }
+
+  // IM2P WS simulation. target system.
+  // activation: ExSIA, weight: hierarchical block
+  static void tiled_matmul_im2p_ws(struct ggml_gemmini_args_t *args) {
+    tiled_matmul_im2p_impl(args, false, "[tiled_matmul_im2p_ws] ws-sim.Q8_0_R tiled matmul");
+  }
+
+  static void tiled_matmul_auto_im2p(struct ggml_gemmini_args_t *args) {
+    if (args == NULL)
+      return;
+
+    const char *layer = ggml::gemmini::types::to_string(args->layer_type);
+    if (args->tiled_matmul_type == CPU)
+    {
+      tiled_matmul_im2p_sw(args);
+      return;
+    }
+    if (args->tiled_matmul_type == WS)
+    {
+      tiled_matmul_im2p_ws(args);
+      return;
+    }
+
+    gemmini_log_debug_layer(layer, "[tiled_matmul_auto_im2p] OS mode is unsupported");
+  }
+
+  // baseline system.
+  // activation: ExSIA, weight: per-tensor
+  static void tiled_matmul_auto_exsia(struct ggml_gemmini_args_t *args) {
+    if (args == NULL)
+      return;
+
+    if (!args->weight_i8_scale_active)
+      return;
+
+    const char *layer = ggml::gemmini::types::to_string(args->layer_type);
+    uint64_t start = ggml::gemmini::cycle::read();
+
+    if (args->A == nullptr || args->B == nullptr || args->f_out == nullptr)
+      return;
+
+    const size_t dim_I = args->I;
+    const size_t dim_J = args->J;
+    const size_t dim_K = args->K;
+    if (dim_I == 0 || dim_J == 0 || dim_K == 0 || args->sB == 0 || !std::isfinite(args->weight_scale))
+      return;
+
+    GGML_ASSERT(args->act == NO_ACTIVATION);
+
+    if (args->tile_I == 0 || args->tile_J == 0 || args->tile_K == 0)
+      gemmini_set_tile(args);
+
+    const size_t tile_rows = args->tile_I * DIM;
+    if (tile_rows == 0)
+      return;
+
+    const elem_t *A = args->A;
+    const elem_t *B = args->B;
+    const size_t stride_A = args->sA ? args->sA : dim_K;
+    const size_t row_stride_B = args->sB;
+    const size_t out_row_stride = args->stride_f_out ? args->stride_f_out : dim_J;
+    const size_t out_col_stride = args->col_stride_f_out ? args->col_stride_f_out : 1;
+    const auto *activation_meta = std::get_if<ggml::gemmini::quants::act::exsia::Meta>(&args->act_quant.storage());
+    if (activation_meta == nullptr)
+      return;
+
+    const size_t num_i_tiles = (dim_I + tile_rows - 1) / tile_rows;
+    gemmini_log_debug_layer(layer,
+        "[tiled_matmul_auto_exsia] dim=(I=%zu,J=%zu,K=%zu) tile_rows=%zu num_i_tiles=%zu "
+        "weight_scale=%.9f sB=%zu mode=%s",
+        dim_I, dim_J, dim_K, tile_rows, num_i_tiles,
+        static_cast<double>(args->weight_scale), row_stride_B,
+        args->tiled_matmul_type == CPU ? "cpu" : "npu");
+
+    if (args->tiled_matmul_type != CPU)
+    {
+      static thread_local std::vector<acc_t> acc32;
+      acc32.assign(dim_I * dim_J, 0);
+
+      tiled_matmul(dim_I, dim_J, dim_K,
+          A, B, args->D, acc32.data(),
+          stride_A, row_stride_B, args->sD, dim_J,
+          1.0f, args->scale_B, args->scale_D,
+          args->act, args->scale, args->bert_scale, args->repeating_bias,
+          args->tile_I, args->tile_J, args->tile_K,
+          args->transpose_A, args->transpose_B,
+          true, args->low_D,
+          args->weightA,
+          args->tiled_matmul_type);
+
+      for (size_t i = 0; i < dim_I; ++i)
+      {
+        const int tile_row_idx = static_cast<int>(i / tile_rows);
+        const int16_t tile_activation_e_s = activation_meta->resolve_stripe_theta(tile_row_idx);
+        const float activation_scale = gemmini_detail::apply_activation_exponent(1.0f, tile_activation_e_s, 0);
+        const float scale = args->weight_scale * activation_scale;
+        for (size_t j = 0; j < dim_J; ++j)
+        {
+          const size_t idx = i * dim_J + j;
+          const acc_t acc = acc32[idx];
+          args->f_out[i * out_row_stride + j * out_col_stride] = static_cast<float>(acc) * scale;
+          if (j == 0 && (i % tile_rows) == 0)
+          {
+            gemmini_log_debug_layer(layer,
+                "[tiled_matmul_auto_exsia] stripe-dequant row=%zu tile_row=%d acc=%ld "
+                "weight_scale=%.9f exp=%.6f out=%.6f mode=npu",
+                i, tile_row_idx, static_cast<long>(acc),
+                static_cast<double>(args->weight_scale),
+                static_cast<double>(activation_scale),
+                static_cast<double>(args->f_out[i * out_row_stride]));
+          }
+        }
+      }
+
+      uint64_t end = ggml::gemmini::cycle::read();
+      gemmini_log_cycle(layer, "[tiled_matmul_auto_exsia] npu.dense_i8 tiled matmul", start, end);
+      return;
+    }
+
+    for (size_t i = 0; i < dim_I; ++i)
+    {
+      const int tile_row_idx = static_cast<int>(i / tile_rows);
+      const int16_t tile_activation_e_s = activation_meta->resolve_stripe_theta(tile_row_idx);
+      const float activation_scale = gemmini_detail::apply_activation_exponent(1.0f, tile_activation_e_s, 0);
+      const float scale = args->weight_scale * activation_scale;
+      for (size_t j = 0; j < dim_J; ++j)
+      {
+        int32_t acc = 0;
+        for (size_t k = 0; k < dim_K; ++k)
+        {
+          const elem_t a = args->transpose_A ? A[k * stride_A + i] : A[i * stride_A + k];
+          acc += static_cast<int32_t>(a) * static_cast<int32_t>(B[j * row_stride_B + k]);
+        }
+        args->f_out[i * out_row_stride + j * out_col_stride] = static_cast<float>(acc) * scale;
+        if (j == 0 && (i % tile_rows) == 0)
+        {
+          gemmini_log_debug_layer(layer,
+              "[tiled_matmul_auto_exsia] stripe-dequant row=%zu tile_row=%d acc=%d "
+              "weight_scale=%.9f exp=%.6f out=%.6f mode=cpu",
+              i, tile_row_idx, acc,
+              static_cast<double>(args->weight_scale),
+              static_cast<double>(activation_scale),
+              static_cast<double>(args->f_out[i * out_row_stride]));
+        }
+      }
+    }
+
+    uint64_t end = ggml::gemmini::cycle::read();
+    gemmini_log_cycle(layer, "[tiled_matmul_auto_exsia] cpu.dense_i8 tiled matmul", start, end);
+
   }
 
   // per-tensor implementation. baseline system.
+  // activation: per-tensor, weight: per-tensor
   // TODO: 조찬혁
   static void tiled_matmul_auto_tensor(struct ggml_gemmini_args_t *args){
     // tiled_matmul_auto를 참고하여, gemmini 호출 후 연산 결과를 per-tensor dequantize하도록 구현. 
