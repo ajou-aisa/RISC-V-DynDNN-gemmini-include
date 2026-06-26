@@ -1202,25 +1202,204 @@ static void matmul_cpu(bool transA, bool transB, size_t DIM_I, size_t DIM_J, siz
 
 namespace ggml { namespace gemmini {
   // FP32 matmul fallback; dimension/transpose conventions follow matmul_cpu
-  static void matmul_cpu_fp(bool transA, bool transB, size_t DIM_I, size_t DIM_J, size_t DIM_K,
-                            const float* A, const float* B, const float* D,
-                            float* C,
-                            size_t stride_A, size_t stride_B, size_t stride_D, size_t stride_C) {
+  static void matmul_cpu_fp(bool transA, bool transB,
+                          size_t DIM_I, size_t DIM_J, size_t DIM_K,
+                          const float* A, const float* B, const float* D,
+                          float* C,
+                          size_t stride_A, size_t stride_B,
+                          size_t stride_D, size_t stride_C) {
+  const size_t A_i_stride = transA ? 1        : stride_A;
+  const size_t A_k_stride = transA ? stride_A : 1;
+  const size_t B_j_stride = transB ? stride_B : 1;
+  const size_t B_k_stride = transB ? 1        : stride_B;
+
+  if (DIM_K == 0) {
     for (size_t i = 0; i < DIM_I; i++) {
       for (size_t j = 0; j < DIM_J; j++) {
-        float sum = 0.0f;
-        for (size_t k = 0; k < DIM_K; k++) {
-          float a = transA ? A[k * stride_A + i] : A[i * stride_A + k];
-          float b = transB ? B[j * stride_B + k] : B[k * stride_B + j];
-          sum += a * b;
-        }
-        if (D != NULL) {
-          sum += D[i * stride_D + j];
-        }
-        C[i * stride_C + j] = sum;
+        C[i * stride_C + j] = D == NULL ? 0.0f : D[i * stride_D + j];
       }
     }
+    return;
   }
+
+  const size_t I4 = DIM_I & ~(size_t)3;
+  const size_t J4 = DIM_J & ~(size_t)3;
+
+  // Main 4x4 tile loop
+  for (size_t i = 0; i < I4; i += 4) {
+    for (size_t j = 0; j < J4; j += 4) {
+      float r00 = 0.0f, r01 = 0.0f, r02 = 0.0f, r03 = 0.0f;
+      float r10 = 0.0f, r11 = 0.0f, r12 = 0.0f, r13 = 0.0f;
+      float r20 = 0.0f, r21 = 0.0f, r22 = 0.0f, r23 = 0.0f;
+      float r30 = 0.0f, r31 = 0.0f, r32 = 0.0f, r33 = 0.0f;
+
+      const float* a0 = A + (i + 0) * A_i_stride;
+      const float* a1 = A + (i + 1) * A_i_stride;
+      const float* a2 = A + (i + 2) * A_i_stride;
+      const float* a3 = A + (i + 3) * A_i_stride;
+
+      const float* b0 = B + (j + 0) * B_j_stride;
+      const float* b1 = B + (j + 1) * B_j_stride;
+      const float* b2 = B + (j + 2) * B_j_stride;
+      const float* b3 = B + (j + 3) * B_j_stride;
+
+      for (size_t k = 0; k < DIM_K; k++) {
+        const float av0 = *a0;
+        const float av1 = *a1;
+        const float av2 = *a2;
+        const float av3 = *a3;
+
+        const float bv0 = *b0;
+        const float bv1 = *b1;
+        const float bv2 = *b2;
+        const float bv3 = *b3;
+
+        r00 += av0 * bv0; r01 += av0 * bv1; r02 += av0 * bv2; r03 += av0 * bv3;
+        r10 += av1 * bv0; r11 += av1 * bv1; r12 += av1 * bv2; r13 += av1 * bv3;
+        r20 += av2 * bv0; r21 += av2 * bv1; r22 += av2 * bv2; r23 += av2 * bv3;
+        r30 += av3 * bv0; r31 += av3 * bv1; r32 += av3 * bv2; r33 += av3 * bv3;
+
+        a0 += A_k_stride;
+        a1 += A_k_stride;
+        a2 += A_k_stride;
+        a3 += A_k_stride;
+
+        b0 += B_k_stride;
+        b1 += B_k_stride;
+        b2 += B_k_stride;
+        b3 += B_k_stride;
+      }
+
+      if (D != NULL) {
+        const float* d0 = D + (i + 0) * stride_D + j;
+        const float* d1 = D + (i + 1) * stride_D + j;
+        const float* d2 = D + (i + 2) * stride_D + j;
+        const float* d3 = D + (i + 3) * stride_D + j;
+
+        r00 += d0[0]; r01 += d0[1]; r02 += d0[2]; r03 += d0[3];
+        r10 += d1[0]; r11 += d1[1]; r12 += d1[2]; r13 += d1[3];
+        r20 += d2[0]; r21 += d2[1]; r22 += d2[2]; r23 += d2[3];
+        r30 += d3[0]; r31 += d3[1]; r32 += d3[2]; r33 += d3[3];
+      }
+
+      float* c0 = C + (i + 0) * stride_C + j;
+      float* c1 = C + (i + 1) * stride_C + j;
+      float* c2 = C + (i + 2) * stride_C + j;
+      float* c3 = C + (i + 3) * stride_C + j;
+
+      c0[0] = r00; c0[1] = r01; c0[2] = r02; c0[3] = r03;
+      c1[0] = r10; c1[1] = r11; c1[2] = r12; c1[3] = r13;
+      c2[0] = r20; c2[1] = r21; c2[2] = r22; c2[3] = r23;
+      c3[0] = r30; c3[1] = r31; c3[2] = r32; c3[3] = r33;
+    }
+
+    // Right tail: rows are still 4-wide, columns are scalar
+    for (size_t j = J4; j < DIM_J; j++) {
+      float r0 = 0.0f;
+      float r1 = 0.0f;
+      float r2 = 0.0f;
+      float r3 = 0.0f;
+
+      const float* a0 = A + (i + 0) * A_i_stride;
+      const float* a1 = A + (i + 1) * A_i_stride;
+      const float* a2 = A + (i + 2) * A_i_stride;
+      const float* a3 = A + (i + 3) * A_i_stride;
+      const float* b = B + j * B_j_stride;
+
+      for (size_t k = 0; k < DIM_K; k++) {
+        const float bv = *b;
+
+        r0 += (*a0) * bv;
+        r1 += (*a1) * bv;
+        r2 += (*a2) * bv;
+        r3 += (*a3) * bv;
+
+        a0 += A_k_stride;
+        a1 += A_k_stride;
+        a2 += A_k_stride;
+        a3 += A_k_stride;
+        b += B_k_stride;
+      }
+
+      if (D != NULL) {
+        r0 += D[(i + 0) * stride_D + j];
+        r1 += D[(i + 1) * stride_D + j];
+        r2 += D[(i + 2) * stride_D + j];
+        r3 += D[(i + 3) * stride_D + j];
+      }
+
+      C[(i + 0) * stride_C + j] = r0;
+      C[(i + 1) * stride_C + j] = r1;
+      C[(i + 2) * stride_C + j] = r2;
+      C[(i + 3) * stride_C + j] = r3;
+    }
+  }
+
+  // Bottom tail: remaining rows, 4 columns at a time
+  for (size_t i = I4; i < DIM_I; i++) {
+    for (size_t j = 0; j < J4; j += 4) {
+      float r0 = 0.0f;
+      float r1 = 0.0f;
+      float r2 = 0.0f;
+      float r3 = 0.0f;
+
+      const float* a = A + i * A_i_stride;
+      const float* b0 = B + (j + 0) * B_j_stride;
+      const float* b1 = B + (j + 1) * B_j_stride;
+      const float* b2 = B + (j + 2) * B_j_stride;
+      const float* b3 = B + (j + 3) * B_j_stride;
+
+      for (size_t k = 0; k < DIM_K; k++) {
+        const float av = *a;
+
+        r0 += av * (*b0);
+        r1 += av * (*b1);
+        r2 += av * (*b2);
+        r3 += av * (*b3);
+
+        a += A_k_stride;
+        b0 += B_k_stride;
+        b1 += B_k_stride;
+        b2 += B_k_stride;
+        b3 += B_k_stride;
+      }
+
+      if (D != NULL) {
+        const float* d = D + i * stride_D + j;
+        r0 += d[0];
+        r1 += d[1];
+        r2 += d[2];
+        r3 += d[3];
+      }
+
+      float* c = C + i * stride_C + j;
+      c[0] = r0;
+      c[1] = r1;
+      c[2] = r2;
+      c[3] = r3;
+    }
+
+    // Bottom-right scalar tail
+    for (size_t j = J4; j < DIM_J; j++) {
+      float sum = 0.0f;
+
+      const float* a = A + i * A_i_stride;
+      const float* b = B + j * B_j_stride;
+
+      for (size_t k = 0; k < DIM_K; k++) {
+        sum += (*a) * (*b);
+        a += A_k_stride;
+        b += B_k_stride;
+      }
+
+      if (D != NULL) {
+        sum += D[i * stride_D + j];
+      }
+
+      C[i * stride_C + j] = sum;
+    }
+  }
+}
 
   // INT8 matmul fallback. Keep output INT32
   static void matmul_cpu_int32(bool transA, bool transB, size_t DIM_I, size_t DIM_J, size_t DIM_K,
@@ -1752,19 +1931,20 @@ namespace ggml { namespace gemmini {
       return;
     }
 
+    const bool dense_i8_scalar = args->weight_i8_scale_active;
     if (args->A == nullptr || args->B == nullptr || args->f_out == nullptr ||
-        args->c_b == nullptr)
+        (!dense_i8_scalar && args->c_b == nullptr))
       return;
 
-    // Stripe path requires s_rf_stripe/R_stripe when stripe_J spans multiple logical
-    // output columns; row-wise path requires s_rf/R.
-    const size_t stripe_J_check = args->stripe_J_or_rowwise_elems();
-    if (stripe_J_check > 1)
+    // Q8_0_R requires block/stripe scale metadata. Dense I8 uses one scalar
+    // weight scale, so it intentionally has no c_b/s_rf/R arrays.
+    const size_t stripe_J_check = dense_i8_scalar ? 1 : args->stripe_J_or_rowwise_elems();
+    if (!dense_i8_scalar && stripe_J_check > 1)
     {
       if (args->s_rf_stripe == nullptr || args->R_stripe == nullptr)
         return;
     }
-    else
+    else if (!dense_i8_scalar)
     {
       if (args->s_rf == nullptr || args->R == nullptr)
         return;
@@ -1776,7 +1956,7 @@ namespace ggml { namespace gemmini {
     const size_t dim_I = args->I;
     const size_t dim_J = args->J;
     const size_t dim_K = args->K;
-    if (dim_I == 0 || dim_J == 0 || dim_K == 0 || args->blocks_per_row == 0)
+    if (dim_I == 0 || dim_J == 0 || dim_K == 0 || (!dense_i8_scalar && args->blocks_per_row == 0))
       return;
 
     GGML_ASSERT(args->act == NO_ACTIVATION);
@@ -1792,9 +1972,9 @@ namespace ggml { namespace gemmini {
     const size_t tile_K = args->tile_K;
     const size_t out_row_stride = args->stride_f_out ? args->stride_f_out : dim_J;
     const size_t out_col_stride = args->col_stride_f_out ? args->col_stride_f_out : 1;
-    const size_t scale_rows = args->blocks_J > 0 ? args->blocks_J : dim_J;
-    const size_t stripe_J = args->stripe_J_or_rowwise_elems();
-    const bool use_stripe_scales = (stripe_J > 1) && (args->s_rf_stripe != nullptr) && (args->R_stripe != nullptr);
+    const size_t scale_rows = dense_i8_scalar ? dim_J : (args->blocks_J > 0 ? args->blocks_J : dim_J);
+    const size_t stripe_J = dense_i8_scalar ? 1 : args->stripe_J_or_rowwise_elems();
+    const bool use_stripe_scales = !dense_i8_scalar && (stripe_J > 1) && (args->s_rf_stripe != nullptr) && (args->R_stripe != nullptr);
 
     for (size_t i = 0; i < dim_I; ++i)
     {
@@ -1816,8 +1996,8 @@ namespace ggml { namespace gemmini {
     const size_t num_tile_ks = (dim_K + tile_K * DIM - 1) / (tile_K * DIM);
 
     gemmini_log_debug_layer(layer,
-        "[tiled_block_matmul_auto] dim=(I=%zu,J=%zu,K=%zu) tile_size: A=(I=%zu x K=%zu) B=(J=%zu x K=%zu) | num_tiles: I=%zu J=%zu K=%zu blocks_per_row=%zu stripe_J=%zu",
-        dim_I, dim_J, dim_K, tile_I * DIM, tile_K * DIM, tile_J * DIM, tile_K * DIM, num_i_tiles, num_j_tiles, num_tile_ks, args->blocks_per_row, stripe_J);
+        "[tiled_block_matmul_auto] dim=(I=%zu,J=%zu,K=%zu) tile_size: A=(I=%zu x K=%zu) B=(J=%zu x K=%zu) | num_tiles: I=%zu J=%zu K=%zu blocks_per_row=%zu stripe_J=%zu dense_i8=%s",
+        dim_I, dim_J, dim_K, tile_I * DIM, tile_K * DIM, tile_J * DIM, tile_K * DIM, num_i_tiles, num_j_tiles, num_tile_ks, args->blocks_per_row, stripe_J, dense_i8_scalar ? "1" : "0");
 
     static thread_local std::vector<elem_t> a_tile;
     static thread_local std::vector<int64_t> acc32;
@@ -1883,10 +2063,10 @@ namespace ggml { namespace gemmini {
             const size_t k_in_weight_block = global_k % block_size_k;
             const size_t block_k_actual = std::min(block_size_k - k_in_weight_block, tile_k_actual - k_block);
             const size_t weight_blk = global_k / block_size_k;
-            if (weight_blk >= args->blocks_per_row)
-            {
-              k_block += block_k_actual;
-              continue;
+	            if (!dense_i8_scalar && weight_blk >= args->blocks_per_row)
+	            {
+	              k_block += block_k_actual;
+	              continue;
             }
 
             for (size_t i = 0; i < tile_i_actual; ++i)
@@ -1900,24 +2080,28 @@ namespace ggml { namespace gemmini {
                 if (global_j >= scale_rows)
                   continue;
 
-                const elem_t *b_block = B + global_j * dim_K + weight_blk * block_size_k + k_in_weight_block;
-                int32_t block_dot = 0;
-                for (size_t kk = 0; kk < block_k_actual; ++kk)
-                  block_dot += static_cast<int32_t>(a_row[kk]) * static_cast<int32_t>(b_block[kk]);
+	                const elem_t *b_block = B + global_j * row_stride_B + global_k;
+	                int32_t block_dot = 0;
+	                for (size_t kk = 0; kk < block_k_actual; ++kk)
+	                  block_dot += static_cast<int32_t>(a_row[kk]) * static_cast<int32_t>(b_block[kk]);
 
-                const size_t scale_idx = global_j * args->blocks_per_row + weight_blk;
-                const uint64_t c_eff =
-                    static_cast<uint64_t>(static_cast<uint16_t>(args->c_b[scale_idx])) +
-                    (use_stripe_scales
-                        ? static_cast<uint64_t>(args->R_stripe[global_j / stripe_J])
-                        : static_cast<uint64_t>(args->R[global_j]));
-                const int64_t acc_before = acc_row[j];
-                acc_row[j] += static_cast<int64_t>(block_dot) * static_cast<int64_t>(c_eff);
+	                const int64_t acc_before = acc_row[j];
+	                uint64_t c_eff = 1;
+	                if (!dense_i8_scalar)
+	                {
+	                  const size_t scale_idx = global_j * args->blocks_per_row + weight_blk;
+	                  c_eff = static_cast<uint64_t>(static_cast<uint16_t>(args->c_b[scale_idx])) +
+	                      (use_stripe_scales
+	                          ? static_cast<uint64_t>(args->R_stripe[global_j / stripe_J])
+	                          : static_cast<uint64_t>(args->R[global_j]));
+	                }
+	                acc_row[j] += static_cast<int64_t>(block_dot) * static_cast<int64_t>(c_eff);
 
-                if (i == 0 && j == 0)
-                {
-                    gemmini_log_debug_layer(layer,
-                        "[tiled_block_matmul_auto] block-dequant i=%zu j=%zu k=%zu weight_blk=%zu "
+	                if (!dense_i8_scalar && i == 0 && j == 0)
+	                {
+	                    const size_t scale_idx = global_j * args->blocks_per_row + weight_blk;
+	                    gemmini_log_debug_layer(layer,
+	                        "[tiled_block_matmul_auto] block-dequant i=%zu j=%zu k=%zu weight_blk=%zu "
                         "dot=%d c_b=%u R=%u c_eff=%llu acc_before=%ld acc_after=%ld stripe=%s",
                         tile_i + i, global_j, tile_k + k_block, weight_blk,
                         block_dot,
@@ -1950,8 +2134,8 @@ namespace ggml { namespace gemmini {
         const ggml::gemmini::quants::Stripe output_stripe(tile_i_actual, tile_j_actual, tile_i, tile_j);
         float *stripe_out = args->f_out + tile_i * out_row_stride + tile_j * out_col_stride;
 
-        if (tile_i_actual > 0 && tile_j_actual > 0 && tile_j < scale_rows)
-        {
+	        if (!dense_i8_scalar && tile_i_actual > 0 && tile_j_actual > 0 && tile_j < scale_rows)
+	        {
           const float s_rf_val = use_stripe_scales ? args->s_rf_stripe[stripe_col_idx] : args->s_rf[tile_j];
           const float acc_fp = static_cast<float>(static_cast<double>(acc32[0]) * static_cast<double>(s_rf_val));
           const float contrib = acc_fp * activation_scale;
@@ -1968,8 +2152,20 @@ namespace ggml { namespace gemmini {
               use_stripe_scales ? "1" : "0");
         }
 
-        if (use_stripe_scales)
-        {
+	        if (dense_i8_scalar)
+	        {
+	          ggml::gemmini::update_q80_r_output_impl(
+	              output_stripe,
+	              acc32.data(),
+	              tile_j_actual,
+	              [weight_scale = args->weight_scale](size_t) { return weight_scale; },
+	              activation_scale,
+	              stripe_out,
+	              out_row_stride,
+	              out_col_stride);
+	        }
+	        else if (use_stripe_scales)
+	        {
           ggml::gemmini::update_q80_r_output_impl(
               output_stripe,
               acc32.data(),
