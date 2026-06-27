@@ -18,6 +18,10 @@
 #include <variant>
 #include <vector>
 
+#if defined(GGML_GEMMINI_HAS_OPENMP)
+#include <omp.h>
+#endif
+
 #include "gemmini_params.h"
 
 #define GEMMINI_ASSERTIONS
@@ -1916,6 +1920,36 @@ namespace ggml { namespace gemmini {
                    dim_I, dim_J, dim_K, tile_I, tile_J, tile_K);
   }
 
+  static inline int resolve_im2p_threads(size_t tile_pair_count) {
+    int im2p_threads = 1;
+
+#if defined(GGML_GEMMINI_HAS_OPENMP)
+    const size_t capped_count = std::min(tile_pair_count, static_cast<size_t>(INT_MAX));
+    im2p_threads = std::min(std::max(1, static_cast<int>(capped_count)), omp_get_max_threads());
+#endif
+
+    if (const char *env = getenv("IM2P_THREADS"))
+    {
+      char *end = nullptr;
+      const long parsed = strtol(env, &end, 10);
+      if (end != env && end && *end == '\0' && parsed > 0)
+        im2p_threads = static_cast<int>(std::min(parsed, static_cast<long>(INT_MAX)));
+    }
+
+    return std::max(1, im2p_threads);
+  }
+
+  static inline int resolve_exsia_threads(size_t output_count) {
+    int exsia_threads = 1;
+
+#if defined(GGML_GEMMINI_HAS_OPENMP)
+    const size_t capped_count = std::min(output_count, static_cast<size_t>(INT_MAX));
+    exsia_threads = std::min(std::max(1, static_cast<int>(capped_count)), omp_get_max_threads());
+#endif
+
+    return std::max(1, exsia_threads);
+  }
+
   static void tiled_matmul_im2p_impl(struct ggml_gemmini_args_t *args, bool use_cpu_dot, const char *cycle_label) {
     if (args == NULL)
       return;
@@ -1989,9 +2023,6 @@ namespace ggml { namespace gemmini {
         "[tiled_block_matmul_auto] dim=(I=%zu,J=%zu,K=%zu) tile_size: A=(I=%zu x K=%zu) B=(J=%zu x K=%zu) | num_tiles: I=%zu J=%zu K=%zu blocks_per_row=%zu stripe_J=%zu",
         dim_I, dim_J, dim_K, tile_I * DIM, tile_K * DIM, tile_J * DIM, tile_K * DIM, num_i_tiles, num_j_tiles, num_tile_ks, args->blocks_per_row, stripe_J);
 
-    static thread_local std::vector<elem_t> a_tile;
-    static thread_local std::vector<int64_t> acc32;
-
     const elem_t *A = args->A;
     const elem_t *B = args->B;
     const size_t stride_A = args->sA ? args->sA : dim_K;
@@ -1999,123 +2030,147 @@ namespace ggml { namespace gemmini {
     if (row_stride_B == 0)
       return;
 
-    for (size_t tile_i = 0; tile_i < dim_I; tile_i += tile_I * DIM)
-    {
+    const auto *activation_meta = std::get_if<ggml::gemmini::quants::act::exsia::Meta>(&args->act_quant.storage());
+    const int16_t activation_e_s = activation_meta ? activation_meta->e_s : 0;
+    const int16_t activation_rho = activation_meta ? activation_meta->rho : 0;
+    const size_t tile_pair_count = num_i_tiles * num_j_tiles;
+
+#if defined(GGML_GEMMINI_HAS_OPENMP)
+    const bool use_im2p_openmp = use_cpu_dot && tile_pair_count > 1;
+    const int im2p_threads = use_im2p_openmp ? resolve_im2p_threads(tile_pair_count) : 1;
+    if (use_im2p_openmp)
+      gemmini_log_debug_layer(layer,
+          "[tiled_matmul_im2p_sw] openmp tile_pairs=%zu threads=%d",
+          tile_pair_count, im2p_threads);
+#else
+    const bool use_im2p_openmp = false;
+#endif
+
+    auto run_tile_pair = [&](size_t tile_i_idx, size_t tile_j_idx) {
+      static thread_local std::vector<elem_t> a_tile;
+      static thread_local std::vector<int64_t> acc32;
+
+      const size_t tile_i = tile_i_idx * tile_I * DIM;
+      const size_t tile_j = tile_j_idx * tile_J * DIM;
       const size_t tile_i_actual = std::min(tile_I * DIM, dim_I - tile_i);
-      const int tile_row_idx = static_cast<int>(tile_i / (tile_I * DIM));
+      const size_t tile_j_actual = std::min(tile_J * DIM, dim_J - tile_j);
+      const int tile_row_idx = static_cast<int>(tile_i_idx);
+      const size_t stripe_col_idx = tile_j_idx;
 
-      for (size_t tile_j = 0; tile_j < dim_J; tile_j += tile_J * DIM)
+      if (!use_im2p_openmp)
       {
-        const size_t tile_j_actual = std::min(tile_J * DIM, dim_J - tile_j);
-        const size_t stripe_col_idx = tile_j / (tile_J * DIM);
-        const auto *activation_meta = std::get_if<ggml::gemmini::quants::act::exsia::Meta>(&args->act_quant.storage());
-        const int16_t activation_e_s = activation_meta ? activation_meta->e_s : 0;
-        const int16_t activation_rho = activation_meta ? activation_meta->rho : 0;
-
         gemmini_log_debug_layer(layer,
             "[preload] weight stripe: tile_j=%zu tile_j_actual=%zu stripe_col=%zu stripe_J=%zu use_stripe=%s",
             tile_j, tile_j_actual, stripe_col_idx, stripe_J,
             use_stripe_scales ? "yes" : "no");
+      }
 
-        acc32.assign(tile_i_actual * tile_j_actual, 0);
+      acc32.assign(tile_i_actual * tile_j_actual, 0);
 
-        for (size_t tile_k = 0; tile_k < dim_K; tile_k += tile_K * DIM)
+      for (size_t tile_k = 0; tile_k < dim_K; tile_k += tile_K * DIM)
+      {
+        const size_t tile_k_actual = std::min(tile_K * DIM, dim_K - tile_k);
+        const size_t tile_k_padded = ((tile_k_actual + block_size_k - 1) / block_size_k) * block_size_k;
+        const size_t wavefront = static_cast<size_t>(tile_row_idx) + stripe_col_idx;
+        if (!use_im2p_openmp)
         {
-          const size_t tile_k_actual = std::min(tile_K * DIM, dim_K - tile_k);
-          const size_t tile_k_padded = ((tile_k_actual + block_size_k - 1) / block_size_k) * block_size_k;
-          const int tile_col_idx = static_cast<int>(tile_k / (tile_K * DIM));
-          const size_t wavefront = static_cast<size_t>(tile_row_idx) + stripe_col_idx;
           gemmini_log_debug_layer(layer,
               "[wavefront] wave=%zu tile=(row=%d,col=%zu) stripe=(I=%zu,J=%zu)",
               wavefront, tile_row_idx, stripe_col_idx,
               tile_i_actual, tile_j_actual);
+        }
 
-          a_tile.assign(tile_i_actual * tile_k_padded, 0);
+        a_tile.assign(tile_i_actual * tile_k_padded, 0);
 
-          for (size_t i = 0; i < tile_i_actual; ++i)
+        for (size_t i = 0; i < tile_i_actual; ++i)
+        {
+          for (size_t kk = 0; kk < tile_k_actual; ++kk)
           {
-            for (size_t kk = 0; kk < tile_k_actual; ++kk)
-            {
-              const size_t src_i = tile_i + i;
-              const size_t src_k = tile_k + kk;
-              a_tile[i * tile_k_padded + kk] = args->transpose_A
-                                                  ? A[src_k * stride_A + src_i]
-                                                  : A[src_i * stride_A + src_k];
-            }
+            const size_t src_i = tile_i + i;
+            const size_t src_k = tile_k + kk;
+            a_tile[i * tile_k_padded + kk] = args->transpose_A
+                                                ? A[src_k * stride_A + src_i]
+                                                : A[src_i * stride_A + src_k];
           }
+        }
+        if (!use_im2p_openmp)
+        {
           gemmini_log_debug_layer(layer,
               "[prefetch] activation tile: tile_i=%zu tile_k=%zu size=(%zu x %zu)",
               tile_i, tile_k, tile_i_actual, tile_k_actual);
+        }
 
-          for (size_t k_block = 0; k_block < tile_k_actual;)
+        for (size_t k_block = 0; k_block < tile_k_actual;)
+        {
+          const size_t global_k = tile_k + k_block;
+          const size_t k_in_weight_block = global_k % block_size_k;
+          const size_t block_k_actual = std::min(block_size_k - k_in_weight_block, tile_k_actual - k_block);
+          const size_t weight_blk = global_k / block_size_k;
+          if (weight_blk >= args->blocks_per_row)
           {
-            const size_t global_k = tile_k + k_block;
-            const size_t k_in_weight_block = global_k % block_size_k;
-            const size_t block_k_actual = std::min(block_size_k - k_in_weight_block, tile_k_actual - k_block);
-            const size_t weight_blk = global_k / block_size_k;
-            if (weight_blk >= args->blocks_per_row)
-	            {
-	              k_block += block_k_actual;
-	              continue;
-            }
-
-            for (size_t i = 0; i < tile_i_actual; ++i)
-            {
-              const elem_t *a_row = a_tile.data() + i * tile_k_padded + k_block;
-              int64_t *acc_row = acc32.data() + i * tile_j_actual;
-
-              for (size_t j = 0; j < tile_j_actual; ++j)
-              {
-                const size_t global_j = tile_j + j;
-                if (global_j >= scale_rows)
-                  continue;
-
-	                const elem_t *b_block = B + global_j * row_stride_B + global_k;
-	                int32_t block_dot = 0;
-	                if (use_cpu_dot)
-	                {
-	                  acc_t block_dot_acc = 0;
-	                  matmul_cpu_int32(false, false, 1, 1, block_k_actual,
-	                      a_row, b_block, nullptr, &block_dot_acc,
-	                      block_k_actual, 1, 0, 1,
-	                      1, 1, 1,
-	                      NO_ACTIVATION, 0, 0, false, true);
-	                  block_dot = static_cast<int32_t>(block_dot_acc);
-	                }
-	                else
-	                {
-	                  for (size_t kk = 0; kk < block_k_actual; ++kk)
-	                    block_dot += static_cast<int32_t>(a_row[kk]) * static_cast<int32_t>(b_block[kk]);
-	                }
-
-	                const int64_t acc_before = acc_row[j];
-	                const size_t scale_idx = global_j * args->blocks_per_row + weight_blk;
-	                const uint64_t c_eff = static_cast<uint64_t>(static_cast<uint16_t>(args->c_b[scale_idx])) +
-	                    (use_stripe_scales
-	                        ? static_cast<uint64_t>(args->R_stripe[global_j / stripe_J])
-	                        : static_cast<uint64_t>(args->R[global_j]));
-	                acc_row[j] += static_cast<int64_t>(block_dot) * static_cast<int64_t>(c_eff);
-
-	                if (i == 0 && j == 0)
-	                {
-	                    gemmini_log_debug_layer(layer,
-	                        "[tiled_block_matmul_auto] block-dequant i=%zu j=%zu k=%zu weight_blk=%zu "
-                        "dot=%d c_b=%u R=%u c_eff=%llu acc_before=%ld acc_after=%ld stripe=%s",
-                        tile_i + i, global_j, tile_k + k_block, weight_blk,
-                        block_dot,
-                        static_cast<unsigned int>(args->c_b[scale_idx]),
-                        use_stripe_scales ? static_cast<unsigned int>(args->R_stripe[global_j / stripe_J]) : static_cast<unsigned int>(args->R[global_j]),
-                        static_cast<unsigned long long>(c_eff),
-                        static_cast<long>(acc_before),
-                        static_cast<long>(acc_row[j]),
-                        use_stripe_scales ? "1" : "0");
-                }
-              }
-            }
-
             k_block += block_k_actual;
+            continue;
           }
 
+          for (size_t i = 0; i < tile_i_actual; ++i)
+          {
+            const elem_t *a_row = a_tile.data() + i * tile_k_padded + k_block;
+            int64_t *acc_row = acc32.data() + i * tile_j_actual;
+
+            for (size_t j = 0; j < tile_j_actual; ++j)
+            {
+              const size_t global_j = tile_j + j;
+              if (global_j >= scale_rows)
+                continue;
+
+              const elem_t *b_block = B + global_j * row_stride_B + global_k;
+              int32_t block_dot = 0;
+              if (use_cpu_dot)
+              {
+                acc_t block_dot_acc = 0;
+                matmul_cpu_int32(false, false, 1, 1, block_k_actual,
+                    a_row, b_block, nullptr, &block_dot_acc,
+                    block_k_actual, 1, 0, 1,
+                    1, 1, 1,
+                    NO_ACTIVATION, 0, 0, false, true);
+                block_dot = static_cast<int32_t>(block_dot_acc);
+              }
+              else
+              {
+                for (size_t kk = 0; kk < block_k_actual; ++kk)
+                  block_dot += static_cast<int32_t>(a_row[kk]) * static_cast<int32_t>(b_block[kk]);
+              }
+
+              const int64_t acc_before = acc_row[j];
+              const size_t scale_idx = global_j * args->blocks_per_row + weight_blk;
+              const uint64_t c_eff = static_cast<uint64_t>(static_cast<uint16_t>(args->c_b[scale_idx])) +
+                  (use_stripe_scales
+                      ? static_cast<uint64_t>(args->R_stripe[global_j / stripe_J])
+                      : static_cast<uint64_t>(args->R[global_j]));
+              acc_row[j] += static_cast<int64_t>(block_dot) * static_cast<int64_t>(c_eff);
+
+              if (!use_im2p_openmp && i == 0 && j == 0)
+              {
+                  gemmini_log_debug_layer(layer,
+                      "[tiled_block_matmul_auto] block-dequant i=%zu j=%zu k=%zu weight_blk=%zu "
+                    "dot=%d c_b=%u R=%u c_eff=%llu acc_before=%ld acc_after=%ld stripe=%s",
+                    tile_i + i, global_j, tile_k + k_block, weight_blk,
+                    block_dot,
+                    static_cast<unsigned int>(args->c_b[scale_idx]),
+                    use_stripe_scales ? static_cast<unsigned int>(args->R_stripe[global_j / stripe_J]) : static_cast<unsigned int>(args->R[global_j]),
+                    static_cast<unsigned long long>(c_eff),
+                    static_cast<long>(acc_before),
+                    static_cast<long>(acc_row[j]),
+                    use_stripe_scales ? "1" : "0");
+              }
+            }
+          }
+
+          k_block += block_k_actual;
+        }
+
+        if (!use_im2p_openmp)
+        {
           gemmini_log_debug_layer(layer,
                "[tiled_block_matmul_auto] iter I=[%zu:%zu) J=[%zu:%zu) K=[%zu:%zu) K_pad=%zu blk=[%zu:%zu) pad=%zu e_t=%d rho=%d q=%d",
               tile_i, tile_i + tile_i_actual, tile_j, tile_j + tile_j_actual,
@@ -2126,54 +2181,76 @@ namespace ggml { namespace gemmini {
                static_cast<int>(activation_rho),
               0);
         }
+      }
 
-        const int16_t tile_activation_e_s = activation_meta ? activation_meta->resolve_stripe_theta(tile_row_idx) : 0;
-        const float activation_scale = gemmini_detail::apply_activation_exponent(1.0f, tile_activation_e_s, 0);
-        const ggml::gemmini::quants::Stripe output_stripe(tile_i_actual, tile_j_actual, tile_i, tile_j);
-        float *stripe_out = args->f_out + tile_i * out_row_stride + tile_j * out_col_stride;
+      const int16_t tile_activation_e_s = activation_meta ? activation_meta->resolve_stripe_theta(tile_row_idx) : 0;
+      const float activation_scale = gemmini_detail::apply_activation_exponent(1.0f, tile_activation_e_s, 0);
+      const ggml::gemmini::quants::Stripe output_stripe(tile_i_actual, tile_j_actual, tile_i, tile_j);
+      float *stripe_out = args->f_out + tile_i * out_row_stride + tile_j * out_col_stride;
 
-	        if (tile_i_actual > 0 && tile_j_actual > 0 && tile_j < scale_rows)
-	        {
-          const float s_rf_val = use_stripe_scales ? args->s_rf_stripe[stripe_col_idx] : args->s_rf[tile_j];
-          const float acc_fp = static_cast<float>(static_cast<double>(acc32[0]) * static_cast<double>(s_rf_val));
-          const float contrib = acc_fp * activation_scale;
-          gemmini_log_debug_layer(layer,
-              "[tiled_block_matmul_auto] stripe-dequant i=%zu j=%zu "
-              "acc=%ld s_rf=%.9f acc*s_rf=%.6f exp=%.6f contrib=%.6f -> f_out+=%.6f stripe=%s",
-              tile_i, tile_j,
-              static_cast<long>(acc32[0]),
-              static_cast<double>(s_rf_val),
-              static_cast<double>(acc_fp),
-              static_cast<double>(activation_scale),
-              static_cast<double>(contrib),
-              static_cast<double>(stripe_out[0] + contrib),
-              use_stripe_scales ? "1" : "0");
-        }
+      if (!use_im2p_openmp && tile_i_actual > 0 && tile_j_actual > 0 && tile_j < scale_rows)
+      {
+        const float s_rf_val = use_stripe_scales ? args->s_rf_stripe[stripe_col_idx] : args->s_rf[tile_j];
+        const float acc_fp = static_cast<float>(static_cast<double>(acc32[0]) * static_cast<double>(s_rf_val));
+        const float contrib = acc_fp * activation_scale;
+        gemmini_log_debug_layer(layer,
+            "[tiled_block_matmul_auto] stripe-dequant i=%zu j=%zu "
+            "acc=%ld s_rf=%.9f acc*s_rf=%.6f exp=%.6f contrib=%.6f -> f_out+=%.6f stripe=%s",
+            tile_i, tile_j,
+            static_cast<long>(acc32[0]),
+            static_cast<double>(s_rf_val),
+            static_cast<double>(acc_fp),
+            static_cast<double>(activation_scale),
+            static_cast<double>(contrib),
+            static_cast<double>(stripe_out[0] + contrib),
+            use_stripe_scales ? "1" : "0");
+      }
 
-	        if (use_stripe_scales)
-	        {
-          ggml::gemmini::update_q80_r_output_impl(
-              output_stripe,
-              acc32.data(),
-              tile_j_actual,
-              [s_rf_val = args->s_rf_stripe[stripe_col_idx]](size_t) { return s_rf_val; },
-              activation_scale,
-              stripe_out,
-              out_row_stride,
-              out_col_stride);
-        }
-        else
+      if (use_stripe_scales)
+      {
+        ggml::gemmini::update_q80_r_output_impl(
+            output_stripe,
+            acc32.data(),
+            tile_j_actual,
+            [s_rf_val = args->s_rf_stripe[stripe_col_idx]](size_t) { return s_rf_val; },
+            activation_scale,
+            stripe_out,
+            out_row_stride,
+            out_col_stride);
+      }
+      else
+      {
+        ggml::gemmini::update_q80_r_output_impl(
+            output_stripe,
+            acc32.data(),
+            tile_j_actual,
+            [s_rf = args->s_rf](size_t j) { return s_rf[j]; },
+            activation_scale,
+            stripe_out,
+            out_row_stride,
+            out_col_stride);
+      }
+    };
+
+#if defined(GGML_GEMMINI_HAS_OPENMP)
+    if (use_im2p_openmp)
+    {
+#pragma omp parallel for collapse(2) schedule(static) num_threads(im2p_threads)
+      for (ptrdiff_t tile_i_idx = 0; tile_i_idx < static_cast<ptrdiff_t>(num_i_tiles); ++tile_i_idx)
+      {
+        for (ptrdiff_t tile_j_idx = 0; tile_j_idx < static_cast<ptrdiff_t>(num_j_tiles); ++tile_j_idx)
         {
-          ggml::gemmini::update_q80_r_output_impl(
-              output_stripe,
-              acc32.data(),
-              tile_j_actual,
-              [s_rf = args->s_rf](size_t j) { return s_rf[j]; },
-              activation_scale,
-              stripe_out,
-              out_row_stride,
-              out_col_stride);
+          run_tile_pair(static_cast<size_t>(tile_i_idx), static_cast<size_t>(tile_j_idx));
         }
+      }
+    }
+    else
+#endif
+    for (size_t tile_i_idx = 0; tile_i_idx < num_i_tiles; ++tile_i_idx)
+    {
+      for (size_t tile_j_idx = 0; tile_j_idx < num_j_tiles; ++tile_j_idx)
+      {
+        run_tile_pair(tile_i_idx, tile_j_idx);
       }
     }
 
@@ -2250,7 +2327,27 @@ namespace ggml { namespace gemmini {
     if (activation_meta == nullptr)
       return;
 
+    std::vector<float> activation_scales(dim_I);
+    for (size_t i = 0; i < dim_I; ++i)
+    {
+      const int tile_row_idx = static_cast<int>(i / tile_rows);
+      const int16_t tile_activation_e_s = activation_meta->resolve_stripe_theta(tile_row_idx);
+      activation_scales[i] = gemmini_detail::apply_activation_exponent(1.0f, tile_activation_e_s, 0);
+    }
+
     const size_t num_i_tiles = (dim_I + tile_rows - 1) / tile_rows;
+    const size_t output_count = dim_I > SIZE_MAX / dim_J ? SIZE_MAX : dim_I * dim_J;
+#if defined(GGML_GEMMINI_HAS_OPENMP)
+    const bool use_exsia_openmp = output_count > 1;
+    const int exsia_threads = use_exsia_openmp ? resolve_exsia_threads(output_count) : 1;
+    if (use_exsia_openmp)
+      gemmini_log_debug_layer(layer,
+          "[tiled_matmul_auto_exsia] openmp outputs=%zu threads=%d mode=%s",
+          output_count, exsia_threads,
+          args->tiled_matmul_type == CPU ? "cpu" : "npu-dequant");
+#else
+    const bool use_exsia_openmp = false;
+#endif
     gemmini_log_debug_layer(layer,
         "[tiled_matmul_auto_exsia] dim=(I=%zu,J=%zu,K=%zu) tile_rows=%zu num_i_tiles=%zu "
         "weight_scale=%.9f sB=%zu mode=%s",
@@ -2274,28 +2371,40 @@ namespace ggml { namespace gemmini {
           args->weightA,
           args->tiled_matmul_type);
 
-      for (size_t i = 0; i < dim_I; ++i)
-      {
+      const acc_t * const acc_data = acc32.data();
+      auto dequantize_output = [&](size_t i, size_t j) {
         const int tile_row_idx = static_cast<int>(i / tile_rows);
-        const int16_t tile_activation_e_s = activation_meta->resolve_stripe_theta(tile_row_idx);
-        const float activation_scale = gemmini_detail::apply_activation_exponent(1.0f, tile_activation_e_s, 0);
+        const float activation_scale = activation_scales[i];
         const float scale = args->weight_scale * activation_scale;
-        for (size_t j = 0; j < dim_J; ++j)
+        const size_t idx = i * dim_J + j;
+        const acc_t acc = acc_data[idx];
+        args->f_out[i * out_row_stride + j * out_col_stride] = static_cast<float>(acc) * scale;
+        if (!use_exsia_openmp && j == 0 && (i % tile_rows) == 0)
         {
-          const size_t idx = i * dim_J + j;
-          const acc_t acc = acc32[idx];
-          args->f_out[i * out_row_stride + j * out_col_stride] = static_cast<float>(acc) * scale;
-          if (j == 0 && (i % tile_rows) == 0)
-          {
-            gemmini_log_debug_layer(layer,
-                "[tiled_matmul_auto_exsia] stripe-dequant row=%zu tile_row=%d acc=%ld "
-                "weight_scale=%.9f exp=%.6f out=%.6f mode=npu",
-                i, tile_row_idx, static_cast<long>(acc),
-                static_cast<double>(args->weight_scale),
-                static_cast<double>(activation_scale),
-                static_cast<double>(args->f_out[i * out_row_stride]));
-          }
+          gemmini_log_debug_layer(layer,
+              "[tiled_matmul_auto_exsia] stripe-dequant row=%zu tile_row=%d acc=%ld "
+              "weight_scale=%.9f exp=%.6f out=%.6f mode=npu",
+              i, tile_row_idx, static_cast<long>(acc),
+              static_cast<double>(args->weight_scale),
+              static_cast<double>(activation_scale),
+              static_cast<double>(args->f_out[i * out_row_stride]));
         }
+      };
+
+#if defined(GGML_GEMMINI_HAS_OPENMP)
+      if (use_exsia_openmp)
+      {
+#pragma omp parallel for collapse(2) schedule(static) num_threads(exsia_threads)
+        for (ptrdiff_t i = 0; i < static_cast<ptrdiff_t>(dim_I); ++i)
+          for (ptrdiff_t j = 0; j < static_cast<ptrdiff_t>(dim_J); ++j)
+            dequantize_output(static_cast<size_t>(i), static_cast<size_t>(j));
+      }
+      else
+#endif
+      {
+        for (size_t i = 0; i < dim_I; ++i)
+          for (size_t j = 0; j < dim_J; ++j)
+            dequantize_output(i, j);
       }
 
       uint64_t end = ggml::gemmini::cycle::read();
@@ -2303,32 +2412,43 @@ namespace ggml { namespace gemmini {
       return;
     }
 
-    for (size_t i = 0; i < dim_I; ++i)
-    {
+    auto compute_output = [&](size_t i, size_t j) {
       const int tile_row_idx = static_cast<int>(i / tile_rows);
-      const int16_t tile_activation_e_s = activation_meta->resolve_stripe_theta(tile_row_idx);
-      const float activation_scale = gemmini_detail::apply_activation_exponent(1.0f, tile_activation_e_s, 0);
+      const float activation_scale = activation_scales[i];
       const float scale = args->weight_scale * activation_scale;
-      for (size_t j = 0; j < dim_J; ++j)
+      int32_t acc = 0;
+      for (size_t k = 0; k < dim_K; ++k)
       {
-        int32_t acc = 0;
-        for (size_t k = 0; k < dim_K; ++k)
-        {
-          const elem_t a = args->transpose_A ? A[k * stride_A + i] : A[i * stride_A + k];
-          acc += static_cast<int32_t>(a) * static_cast<int32_t>(B[j * row_stride_B + k]);
-        }
-        args->f_out[i * out_row_stride + j * out_col_stride] = static_cast<float>(acc) * scale;
-        if (j == 0 && (i % tile_rows) == 0)
-        {
-          gemmini_log_debug_layer(layer,
-              "[tiled_matmul_auto_exsia] stripe-dequant row=%zu tile_row=%d acc=%d "
-              "weight_scale=%.9f exp=%.6f out=%.6f mode=cpu",
-              i, tile_row_idx, acc,
-              static_cast<double>(args->weight_scale),
-              static_cast<double>(activation_scale),
-              static_cast<double>(args->f_out[i * out_row_stride]));
-        }
+        const elem_t a = args->transpose_A ? A[k * stride_A + i] : A[i * stride_A + k];
+        acc += static_cast<int32_t>(a) * static_cast<int32_t>(B[j * row_stride_B + k]);
       }
+      args->f_out[i * out_row_stride + j * out_col_stride] = static_cast<float>(acc) * scale;
+      if (!use_exsia_openmp && j == 0 && (i % tile_rows) == 0)
+      {
+        gemmini_log_debug_layer(layer,
+            "[tiled_matmul_auto_exsia] stripe-dequant row=%zu tile_row=%d acc=%d "
+            "weight_scale=%.9f exp=%.6f out=%.6f mode=cpu",
+            i, tile_row_idx, acc,
+            static_cast<double>(args->weight_scale),
+            static_cast<double>(activation_scale),
+            static_cast<double>(args->f_out[i * out_row_stride]));
+      }
+    };
+
+#if defined(GGML_GEMMINI_HAS_OPENMP)
+    if (use_exsia_openmp)
+    {
+#pragma omp parallel for collapse(2) schedule(static) num_threads(exsia_threads)
+      for (ptrdiff_t i = 0; i < static_cast<ptrdiff_t>(dim_I); ++i)
+        for (ptrdiff_t j = 0; j < static_cast<ptrdiff_t>(dim_J); ++j)
+          compute_output(static_cast<size_t>(i), static_cast<size_t>(j));
+    }
+    else
+#endif
+    {
+      for (size_t i = 0; i < dim_I; ++i)
+        for (size_t j = 0; j < dim_J; ++j)
+          compute_output(i, j);
     }
 
     uint64_t end = ggml::gemmini::cycle::read();
