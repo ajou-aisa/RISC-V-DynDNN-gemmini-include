@@ -1920,6 +1920,18 @@ namespace ggml { namespace gemmini {
                    dim_I, dim_J, dim_K, tile_I, tile_J, tile_K);
   }
 
+  static inline int resolve_env_threads(const char *name, int fallback) {
+    if (const char *env = getenv(name))
+    {
+      char *end = nullptr;
+      const long parsed = strtol(env, &end, 10);
+      if (end != env && end && *end == '\0' && parsed > 0)
+        return static_cast<int>(std::min(parsed, static_cast<long>(INT_MAX)));
+    }
+
+    return fallback;
+  }
+
   static inline int resolve_im2p_threads(size_t tile_pair_count) {
     int im2p_threads = 1;
 
@@ -1928,13 +1940,8 @@ namespace ggml { namespace gemmini {
     im2p_threads = std::min(std::max(1, static_cast<int>(capped_count)), omp_get_max_threads());
 #endif
 
-    if (const char *env = getenv("IM2P_THREADS"))
-    {
-      char *end = nullptr;
-      const long parsed = strtol(env, &end, 10);
-      if (end != env && end && *end == '\0' && parsed > 0)
-        im2p_threads = static_cast<int>(std::min(parsed, static_cast<long>(INT_MAX)));
-    }
+    im2p_threads = resolve_env_threads("GEMMINI_OPENMP_THREADS", im2p_threads);
+    im2p_threads = resolve_env_threads("IM2P_THREADS", im2p_threads);
 
     return std::max(1, im2p_threads);
   }
@@ -1946,6 +1953,9 @@ namespace ggml { namespace gemmini {
     const size_t capped_count = std::min(output_count, static_cast<size_t>(INT_MAX));
     exsia_threads = std::min(std::max(1, static_cast<int>(capped_count)), omp_get_max_threads());
 #endif
+
+    exsia_threads = resolve_env_threads("GEMMINI_OPENMP_THREADS", exsia_threads);
+    exsia_threads = resolve_env_threads("EXSIA_THREADS", exsia_threads);
 
     return std::max(1, exsia_threads);
   }
