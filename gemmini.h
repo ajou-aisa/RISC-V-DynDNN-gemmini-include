@@ -2333,17 +2333,8 @@ namespace ggml { namespace gemmini {
     const size_t row_stride_B = args->sB;
     const size_t out_row_stride = args->stride_f_out ? args->stride_f_out : dim_J;
     const size_t out_col_stride = args->col_stride_f_out ? args->col_stride_f_out : 1;
-    const auto *activation_meta = std::get_if<ggml::gemmini::quants::act::exsia::Meta>(&args->act_quant.storage());
-    if (activation_meta == nullptr)
+    if (std::get_if<ggml::gemmini::quants::act::exsia::Meta>(&args->act_quant.storage()) == nullptr)
       return;
-
-    std::vector<float> activation_scales(dim_I);
-    for (size_t i = 0; i < dim_I; ++i)
-    {
-      const int tile_row_idx = static_cast<int>(i / tile_rows);
-      const int16_t tile_activation_e_s = activation_meta->resolve_stripe_theta(tile_row_idx);
-      activation_scales[i] = gemmini_detail::apply_activation_exponent(1.0f, tile_activation_e_s, 0);
-    }
 
     const size_t num_i_tiles = (dim_I + tile_rows - 1) / tile_rows;
     const size_t output_count = dim_I > SIZE_MAX / dim_J ? SIZE_MAX : dim_I * dim_J;
@@ -2365,11 +2356,10 @@ namespace ggml { namespace gemmini {
         static_cast<double>(args->weight_scale), row_stride_B,
         args->tiled_matmul_type == CPU ? "cpu" : "npu");
 
+    std::vector<acc_t> acc32(dim_I * dim_J, 0);
+
     if (args->tiled_matmul_type != CPU)
     {
-      static thread_local std::vector<acc_t> acc32;
-      acc32.assign(dim_I * dim_J, 0);
-
       tiled_matmul(dim_I, dim_J, dim_K,
           A, B, args->D, acc32.data(),
           stride_A, row_stride_B, args->sD, dim_J,
@@ -2380,25 +2370,16 @@ namespace ggml { namespace gemmini {
           true, args->low_D,
           args->weightA,
           args->tiled_matmul_type);
-
-      const acc_t * const acc_data = acc32.data();
-      auto dequantize_output = [&](size_t i, size_t j) {
-        const int tile_row_idx = static_cast<int>(i / tile_rows);
-        const float activation_scale = activation_scales[i];
-        const float scale = args->weight_scale * activation_scale;
-        const size_t idx = i * dim_J + j;
-        const acc_t acc = acc_data[idx];
-        args->f_out[i * out_row_stride + j * out_col_stride] = static_cast<float>(acc) * scale;
-        if (!use_exsia_openmp && j == 0 && (i % tile_rows) == 0)
+    } else
+    {
+      auto compute_accumulator = [&](size_t i, size_t j) {
+        int32_t acc = 0;
+        for (size_t k = 0; k < dim_K; ++k)
         {
-          gemmini_log_debug_layer(layer,
-              "[tiled_matmul_auto_exsia] stripe-dequant row=%zu tile_row=%d acc=%ld "
-              "weight_scale=%.9f exp=%.6f out=%.6f mode=npu",
-              i, tile_row_idx, static_cast<long>(acc),
-              static_cast<double>(args->weight_scale),
-              static_cast<double>(activation_scale),
-              static_cast<double>(args->f_out[i * out_row_stride]));
+          const elem_t a = args->transpose_A ? A[k * stride_A + i] : A[i * stride_A + k];
+          acc += static_cast<int32_t>(a) * static_cast<int32_t>(B[j * row_stride_B + k]);
         }
+        acc32[i * dim_J + j] = acc;
       };
 
 #if defined(GGML_GEMMINI_HAS_OPENMP)
@@ -2407,62 +2388,29 @@ namespace ggml { namespace gemmini {
 #pragma omp parallel for collapse(2) schedule(static) num_threads(exsia_threads)
         for (ptrdiff_t i = 0; i < static_cast<ptrdiff_t>(dim_I); ++i)
           for (ptrdiff_t j = 0; j < static_cast<ptrdiff_t>(dim_J); ++j)
-            dequantize_output(static_cast<size_t>(i), static_cast<size_t>(j));
+            compute_accumulator(static_cast<size_t>(i), static_cast<size_t>(j));
       }
       else
 #endif
       {
         for (size_t i = 0; i < dim_I; ++i)
           for (size_t j = 0; j < dim_J; ++j)
-            dequantize_output(i, j);
+            compute_accumulator(i, j);
       }
-
-      uint64_t end = ggml::gemmini::cycle::read();
-      gemmini_log_cycle(layer, "[tiled_matmul_auto_exsia] npu.dense_i8 tiled matmul", start, end);
-      return;
     }
 
-    auto compute_output = [&](size_t i, size_t j) {
-      const int tile_row_idx = static_cast<int>(i / tile_rows);
-      const float activation_scale = activation_scales[i];
-      const float scale = args->weight_scale * activation_scale;
-      int32_t acc = 0;
-      for (size_t k = 0; k < dim_K; ++k)
-      {
-        const elem_t a = args->transpose_A ? A[k * stride_A + i] : A[i * stride_A + k];
-        acc += static_cast<int32_t>(a) * static_cast<int32_t>(B[j * row_stride_B + k]);
-      }
-      args->f_out[i * out_row_stride + j * out_col_stride] = static_cast<float>(acc) * scale;
-      if (!use_exsia_openmp && j == 0 && (i % tile_rows) == 0)
-      {
-        gemmini_log_debug_layer(layer,
-            "[tiled_matmul_auto_exsia] stripe-dequant row=%zu tile_row=%d acc=%d "
-            "weight_scale=%.9f exp=%.6f out=%.6f mode=cpu",
-            i, tile_row_idx, acc,
-            static_cast<double>(args->weight_scale),
-            static_cast<double>(activation_scale),
-            static_cast<double>(args->f_out[i * out_row_stride]));
-      }
-    };
+    for (size_t i = 0; i < dim_I; ++i)
+      for (size_t j = 0; j < dim_J; ++j)
+        args->f_out[i * out_row_stride + j * out_col_stride] = 0.0f;
 
-#if defined(GGML_GEMMINI_HAS_OPENMP)
-    if (use_exsia_openmp)
-    {
-#pragma omp parallel for collapse(2) schedule(static) num_threads(exsia_threads)
-      for (ptrdiff_t i = 0; i < static_cast<ptrdiff_t>(dim_I); ++i)
-        for (ptrdiff_t j = 0; j < static_cast<ptrdiff_t>(dim_J); ++j)
-          compute_output(static_cast<size_t>(i), static_cast<size_t>(j));
-    }
-    else
-#endif
-    {
-      for (size_t i = 0; i < dim_I; ++i)
-        for (size_t j = 0; j < dim_J; ++j)
-          compute_output(i, j);
-    }
+    ggml::gemmini::dequantize(*args, 0, dim_K, acc32.data(), dim_J);
 
     uint64_t end = ggml::gemmini::cycle::read();
-    gemmini_log_cycle(layer, "[tiled_matmul_auto_exsia] cpu.dense_i8 tiled matmul", start, end);
+    gemmini_log_cycle(layer,
+        args->tiled_matmul_type == CPU ?
+            "[tiled_matmul_auto_exsia] cpu.dense_i8 tiled matmul" :
+            "[tiled_matmul_auto_exsia] npu.dense_i8 tiled matmul",
+        start, end);
 
   }
 
@@ -2477,8 +2425,7 @@ namespace ggml { namespace gemmini {
     const char *layer = ggml::gemmini::types::to_string(args->layer_type);
     uint64_t start = ggml::gemmini::cycle::read();
 
-    if (args->A == nullptr || args->B == nullptr || args->f_out == nullptr ||
-        args->c_b == nullptr)
+    if (args->A == nullptr || args->B == nullptr || args->f_out == nullptr)
       return;
 
     if (args->tile_I == 0 || args->tile_J == 0 || args->tile_K == 0)
@@ -2487,10 +2434,58 @@ namespace ggml { namespace gemmini {
     const size_t dim_I = args->I;
     const size_t dim_J = args->J;
     const size_t dim_K = args->K;
+    if (dim_I == 0 || dim_J == 0 || dim_K == 0 || args->sB == 0 ||
+        (args->weight_i8_scale_active && !std::isfinite(args->weight_scale)))
+      return;
 
     GGML_ASSERT(args->act == NO_ACTIVATION);
 
-    // TODO: call gemmini & dequantize.
+    if (std::get_if<ggml::gemmini::quants::act::tensor::Meta>(&args->act_quant.storage()) == nullptr)
+      return;
+
+    const elem_t *A = args->A;
+    const elem_t *B = args->B;
+    const size_t stride_A = args->sA ? args->sA : dim_K;
+    const size_t row_stride_B = args->sB;
+    const size_t out_row_stride = args->stride_f_out ? args->stride_f_out : dim_J;
+    const size_t out_col_stride = args->col_stride_f_out ? args->col_stride_f_out : 1;
+    std::vector<acc_t> acc32(dim_I * dim_J, 0);
+
+    if (args->tiled_matmul_type != CPU)
+    {
+      tiled_matmul(dim_I, dim_J, dim_K,
+          A, B, args->D, acc32.data(),
+          stride_A, row_stride_B, args->sD, dim_J,
+          1.0f, args->scale_B, args->scale_D,
+          args->act, args->scale, args->bert_scale, args->repeating_bias,
+          args->tile_I, args->tile_J, args->tile_K,
+          args->transpose_A, args->transpose_B,
+          true, args->low_D,
+          args->weightA,
+          args->tiled_matmul_type);
+    } else
+    {
+      for (size_t i = 0; i < dim_I; ++i)
+        for (size_t j = 0; j < dim_J; ++j)
+        {
+          int32_t acc = 0;
+          for (size_t k = 0; k < dim_K; ++k)
+          {
+            const elem_t a = args->transpose_A ? A[k * stride_A + i] : A[i * stride_A + k];
+            acc += static_cast<int32_t>(a) * static_cast<int32_t>(B[j * row_stride_B + k]);
+          }
+          acc32[i * dim_J + j] = acc;
+        }
+    }
+
+    for (size_t i = 0; i < dim_I; ++i)
+      for (size_t j = 0; j < dim_J; ++j)
+        args->f_out[i * out_row_stride + j * out_col_stride] = 0.0f;
+
+    ggml::gemmini::dequantize(*args, 0, dim_K, acc32.data(), dim_J);
+
+    uint64_t end = ggml::gemmini::cycle::read();
+    gemmini_log_cycle(layer, "[tiled_matmul_auto_tensor] dense_i8 tiled matmul", start, end);
   }
 
 }} // namespace ggml::gemmini
