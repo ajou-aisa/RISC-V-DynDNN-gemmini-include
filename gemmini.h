@@ -1675,37 +1675,395 @@ static void tiled_matmul(size_t dim_I, size_t dim_J, size_t dim_K,
 }
 
 namespace ggml { namespace gemmini {
-  // TODO: 김동현
-  // tiled_matmul을 참고하여, fp 텐서를 입력받아 처리하도록 구현.
-  static void tiled_matmul_outer_fp(size_t dim_I, size_t dim_J, size_t dim_K,
-        const float* A, const float* B,
-        const float* D, float* C,
-        size_t stride_A, size_t stride_B, size_t stride_D, size_t stride_C,
-        size_t tile_I, size_t tile_J, size_t tile_K,
-        bool transpose_A, bool transpose_B,
-        enum tiled_matmul_type_t tiled_matmul_type) {
-    (void) dim_I; (void) dim_J; (void) dim_K;
-    (void) A; (void) B; (void) D; (void) C;
-    (void) stride_A; (void) stride_B; (void) stride_D; (void) stride_C;
-    (void) tile_I; (void) tile_J; (void) tile_K;
-    (void) transpose_A; (void) transpose_B; (void) tiled_matmul_type;
+  // Tiling functions
+  static inline void gemmini_loop_ws_fp(size_t I, size_t J, size_t K,
+          size_t pad_I, size_t pad_J, size_t pad_K,
+          const float * A, const float * B, const float * D, float * C,
+          size_t A_stride_bytes, size_t B_stride_bytes,
+          size_t D_stride_bytes, size_t C_stride_bytes,
+          bool A_transpose, bool B_transpose,
+          bool full_C, bool low_D,
+          bool ex_accumulate, int act,
+          int a_spad_id, int b_spad_id, bool is_resadd) {
+    ROCC_INSTRUCTION_RS1_RS2(XCUSTOM_ACC, ((uint64_t)(pad_K) << 32) | ((uint64_t)(pad_J) << 16) | (uint64_t)(pad_I), ((uint64_t)(K) << 32) | ((uint64_t)(J) << 16) | (uint64_t)(I), k_LOOP_WS_CONFIG_BOUNDS)
+    ROCC_INSTRUCTION_RS1_RS2(XCUSTOM_ACC, A, B, k_LOOP_WS_CONFIG_ADDRS_AB)
+    ROCC_INSTRUCTION_RS1_RS2(XCUSTOM_ACC, D, C, k_LOOP_WS_CONFIG_ADDRS_DC)
+    ROCC_INSTRUCTION_RS1_RS2(XCUSTOM_ACC, A_stride_bytes, B_stride_bytes, k_LOOP_WS_CONFIG_STRIDES_AB)
+    ROCC_INSTRUCTION_RS1_RS2(XCUSTOM_ACC, D_stride_bytes, C_stride_bytes, k_LOOP_WS_CONFIG_STRIDES_DC)
+    ROCC_INSTRUCTION_RS1_RS2(XCUSTOM_ACC, ((uint64_t)(a_spad_id) << 18) | ((uint64_t)(b_spad_id) << 16) | ((uint64_t)(act) << 8) | ((low_D) << 2) | ((full_C) << 1) | (ex_accumulate), ((is_resadd) << 2) | ((B_transpose) << 1) | (A_transpose), k_LOOP_WS)
   }
+
+  static void sp_tiled_matmul_os_fp(const float * A, const float * B, const float * D, float * C,
+          scale_t A_scale_factor, scale_t B_scale_factor, scale_acc_t D_scale_factor,
+          size_t I, size_t J, size_t K, size_t pad_I, size_t pad_J, size_t pad_K,
+          size_t A_row_stride, size_t B_row_stride, size_t D_row_stride, size_t C_row_stride,
+          bool a_transpose, bool b_transpose,
+          bool full_C, bool low_D,
+          bool no_bias, bool repeating_bias,
+          int act,
+          int a_spad_id, int b_spad_id) {
+
+    const uint32_t A_sp_addr_start = 0;
+    const uint32_t B_sp_addr_start = BANK_NUM * BANK_ROWS - K * J * DIM;
+    const uint32_t D_sp_addr_start = 1 << (ADDR_LEN-1);
+    const uint32_t C_sp_addr_start = (3 << (ADDR_LEN-2)) | (full_C << (ADDR_LEN-3));
+
+    const int A_blocks = K <= MAX_BLOCK_LEN ? K : MAX_BLOCK_LEN;
+    const int B_blocks = J <= MAX_BLOCK_LEN ? J : MAX_BLOCK_LEN;
+    const int D_blocks = J <= MAX_BLOCK_LEN_ACC ? J : MAX_BLOCK_LEN_ACC;
+
+    // Move-in D
+    if (D != NULL && !no_bias) {
+      // TODO(fp): acc_t 기준 stride와 포인터 산술을 float 기준으로 바꾼다.
+      const size_t D_stride = repeating_bias ? 0 : D_row_stride * sizeof(acc_t);
+      gemmini_extended_config_ld(D_stride, D_scale_factor);
+
+      for (size_t i = 0; i < I; i++) {
+        for (size_t j = 0; j < J; j += D_blocks) {
+          const size_t bias_row = repeating_bias ? 0 : i;
+          // TODO(fp): D는 const float* 시그니처이므로 acc_t* 캐스팅을 제거하고 float 포인터 산술로 바꾼다.
+          const acc_t * const D_dram_addr = (acc_t *)D + (bias_row * D_row_stride + j)*DIM;
+
+          const uint32_t D_sp_addr_acc = D_sp_addr_start + (i*J + j)*DIM;
+
+          const size_t blocks = j + D_blocks <= J ? D_blocks : J-j;
+
+          const size_t cols = blocks * DIM - (j + blocks >= J ? pad_J : 0);
+          const size_t rows = DIM - (i == I-1 ? pad_I : 0);
+
+          gemmini_extended_mvin(D_dram_addr, D_sp_addr_acc, cols, rows);
+        }
+      }
+    }
+
+    // Move-in B
+    // TODO(fp): elem_t 기준 stride를 float 기준 stride로 바꾼다.
+    gemmini_extended_config_ld(B_row_stride * sizeof(elem_t), B_scale_factor);
+    for (size_t j = 0; j < J; j += B_blocks) {
+      for (size_t k = 0; k < K; k++) {
+        // TODO(fp): B는 const float* 시그니처이므로 elem_t* 지역 포인터를 float* 기준으로 바꾼다.
+        const elem_t * const B_dram_addr = B + (k*B_row_stride + j)*DIM;
+        const uint32_t B_sp_addr = B_sp_addr_start + (k*J + j)*DIM;
+        const size_t blocks = j + B_blocks <= J ? B_blocks : J-j;
+        const size_t cols = blocks * DIM - (j + blocks >= J ? pad_J : 0);
+        const size_t rows = DIM - (k == K-1 ? pad_K : 0);
+        gemmini_extended_mvin(B_dram_addr, B_sp_addr, cols, rows);
+      }
+    }
+
+    // Move-in A
+    // TODO(fp): elem_t 기준 stride를 float 기준 stride로 바꾼다.
+    gemmini_extended_config_ld(A_row_stride * sizeof(elem_t), A_scale_factor);
+    for (size_t i = 0; i < I; i++) {
+      for (size_t k = 0; k < K; k += A_blocks) {
+        // TODO(fp): A는 const float* 시그니처이므로 elem_t* 지역 포인터를 float* 기준으로 바꾼다.
+        const elem_t * const A_dram_addr = A + (i*A_row_stride + k)*DIM;
+        const uint32_t A_sp_addr = A_sp_addr_start + (i*K + k)*DIM;
+        const size_t blocks = k + A_blocks <= K ? A_blocks : K-k;
+        const size_t cols = blocks * DIM - (k + blocks >= K ? pad_K : 0);
+        const size_t rows = DIM - (i == I-1 ? pad_I : 0);
+        gemmini_extended_mvin(A_dram_addr, A_sp_addr, cols, rows);
+      }
+    }
+
+    for (size_t i = 0; i < I; i++) {
+      for (size_t j = 0; j < J; j++) {
+        const uint32_t C_sp_addr = C_sp_addr_start + (i*J + j)*DIM;
+
+        for (size_t k = 0; k < K; k++) {
+
+          const uint32_t A_sp_addr = A_sp_addr_start + (i*K + k)*DIM;
+          const uint32_t B_sp_addr = B_sp_addr_start + (k*J + j)*DIM;
+
+          uint32_t out_sp_addr = k == K-1 ? C_sp_addr : GARBAGE_ADDR;
+
+          // If we're not using a bias, then we want to overwrite what's in the
+          // accumulator, rather than writing over it
+          int no_bias_new_matrix = no_bias && D != NULL && k == K-1;
+          if (no_bias_new_matrix) {
+            out_sp_addr &= ~(1 << (ADDR_LEN-2));
+          }
+
+          const size_t A_cols = DIM - (k == K - 1 ? pad_K : 0);
+          const size_t A_rows = DIM - (i == I - 1 ? pad_I : 0);
+          const size_t B_cols = DIM - (j == J - 1 ? pad_J : 0);
+          const size_t B_rows = DIM - (k == K - 1 ? pad_K : 0);
+          const size_t C_cols = DIM - (j == J - 1 ? pad_J : 0);
+          const size_t C_rows = DIM - (i == I - 1 ? pad_I : 0);
+
+          gemmini_extended_preload(GARBAGE_ADDR, out_sp_addr, DIM, DIM, C_cols, C_rows);
+
+          if (k == 0) { // First iteration
+            gemmini_extended_compute_preloaded(A_sp_addr, B_sp_addr, A_cols, A_rows, B_cols, B_rows);
+          } else { // All other iterations
+            gemmini_extended_compute_accumulated(A_sp_addr, B_sp_addr, A_cols, A_rows, B_cols, B_rows);
+          }
+        }
+      }
+    }
+
+    // Move-out C
+    if (C != NULL) {
+      // TODO(fp): elem_t/acc_t 출력 크기 분기를 float 출력 크기로 바꾼다.
+      const size_t sizeof_C = full_C ? sizeof(acc_t) : sizeof(elem_t);
+
+      for (size_t i = 0; i < I; i++) {
+        for (size_t j = 0; j < J; j++) {
+          void * const C_dram_addr = (int8_t*)C + (i*C_row_stride + j)*DIM*sizeof_C;
+          const uint32_t C_sp_addr = C_sp_addr_start + (i*J + j)*DIM;
+
+          const size_t C_cols = DIM - (j == J - 1 ? pad_J : 0);
+          const size_t C_rows = DIM - (i == I - 1 ? pad_I : 0);
+
+          gemmini_extended_mvout(C_dram_addr, C_sp_addr, C_cols, C_rows);
+        }
+      }
+    }
+  }
+
+
+  static void sp_tiled_matmul_ws_fp(const float * A, const float * B,
+          const float * D, float * C,
+          scale_t A_scale_factor, scale_t B_scale_factor, scale_acc_t D_scale_factor,
+          size_t I, size_t J, size_t K, size_t pad_I, size_t pad_J, size_t pad_K,
+          size_t A_row_stride, size_t B_row_stride, size_t D_row_stride, size_t C_row_stride,
+          bool a_transpose, bool b_transpose,
+          bool full_C, bool low_D,
+          bool no_bias, bool repeating_bias,
+          int act,
+          int a_spad_id, int b_spad_id) {
+    // Combined loop
+    gemmini_loop_ws_fp(I, J, K, pad_I, pad_J, pad_K, A, B, no_bias ? NULL : D, C,
+      A_row_stride * sizeof(float), B_row_stride * sizeof(float),
+      repeating_bias ? 0 : D_row_stride * sizeof(float), C_row_stride * sizeof(float),
+      a_transpose, b_transpose,
+      full_C, low_D, !no_bias || D == NULL,
+      act, a_spad_id, b_spad_id, false);
+  }
+
+  static void tiled_matmul_outer_fp(size_t dim_I, size_t dim_J, size_t dim_K,
+          const float* A, const float* B,
+          const float* D, float* C,
+          size_t stride_A, size_t stride_B, size_t stride_D, size_t stride_C,
+          scale_t A_scale_factor, scale_t B_scale_factor, scale_acc_t D_scale_factor,
+          size_t tile_I, size_t tile_J, size_t tile_K,
+          int act, acc_scale_t scale, acc_scale_t bert_scale,
+          bool repeating_bias,
+          bool a_transpose, bool b_transpose,
+          bool full_C, bool low_D,
+          uint8_t weightA,
+          int dataflow) {
+
+  const size_t dim_I_padded = (dim_I / DIM + (dim_I % DIM != 0)) * DIM;
+  const size_t dim_J_padded = (dim_J / DIM + (dim_J % DIM != 0)) * DIM;
+  const size_t dim_K_padded = (dim_K / DIM + (dim_K % DIM != 0)) * DIM;
+
+  const size_t I0 = dim_I_padded / (tile_I*DIM) + (dim_I_padded % (tile_I*DIM) != 0);
+  const size_t J0 = dim_J_padded / (tile_J*DIM) + (dim_J_padded % (tile_J*DIM) != 0);
+  const size_t K0 = dim_K_padded / (tile_K*DIM) + (dim_K_padded % (tile_K*DIM) != 0);
+
+  // These lines here are supposed to help us deal with when the dimensions of
+  // the systolic array aren't divisible by the tiling factors
+  const size_t last_I = dim_I_padded % (tile_I*DIM) == 0 ? tile_I : (dim_I_padded/DIM) % tile_I;
+  const size_t last_J = dim_J_padded % (tile_J*DIM) == 0 ? tile_J : (dim_J_padded/DIM) % tile_J;
+  const size_t last_K = dim_K_padded % (tile_K*DIM) == 0 ? tile_K : (dim_K_padded/DIM) % tile_K;
+
+  // These lines are supposed to figure out how much padding the hardware is
+  // supposed to add for the final tile
+  const size_t padding_I = dim_I_padded - dim_I;
+  const size_t padding_J = dim_J_padded - dim_J;
+  const size_t padding_K = dim_K_padded - dim_K;
+
+  const bool no_bias = D == NULL;
+
+  if (no_bias) {
+    // TODO(fp): D는 const float* 시그니처이므로 void* 더미 주소 대입을 const float* 기준으로 바꾼다.
+    D = (void*) 1; // Dummy address which isn't NULL
+  }
+
+  // TODO(fp): elem_t/acc_t 기준 D/C 크기 계산을 float 기준으로 바꾼다.
+  const size_t sizeof_D = low_D ? sizeof(elem_t) : sizeof(acc_t) ;
+  const size_t sizeof_C = full_C ? sizeof(acc_t) : sizeof(elem_t);
+
+  gemmini_extended_config_ex(dataflow, act & 3, 0, 1, a_transpose, b_transpose);
+  gemmini_extended_config_st(stride_C * sizeof_C, act & 3, scale);
+  // TODO(fp): A/B load stride는 sizeof(elem_t)가 아니라 sizeof(float) 기준으로 바꾼다.
+  gemmini_extended3_config_ld(stride_A * sizeof(elem_t), A_scale_factor, false, 0);
+  gemmini_extended3_config_ld(stride_B * sizeof(elem_t), B_scale_factor, false, 1)
+  gemmini_extended3_config_ld(repeating_bias ? 0 : (stride_D * sizeof_D), D_scale_factor, low_D, 2);
+
+  if (act == IGELU) {
+    const acc_scale_t sqrt_2 = 1.41421356237;
+    const acc_scale_t S = bert_scale;
+    const acc_scale_t S_erf = (-0.2888 * ((S*S) / 2));
+
+    const acc_t qb = -1.769 / (S / sqrt_2);
+    const acc_t qc = 1.0 / S_erf;
+
+    gemmini_config_norm(0, 0, 0, 0, 0, qb, qc);
+  }
+
+  if (act == SOFTMAX) {
+    const scale_t a = 0.3585;
+    const scale_t b = 1.353;
+    const scale_t c = 0.344;
+
+    const acc_t qln2 = (int) (0.693147 / bert_scale);
+    const acc_t qln2_inv = 65536 / qln2;
+    const acc_t qb = b / bert_scale;
+    const acc_t qc = c / (a*bert_scale*bert_scale);
+
+    gemmini_config_norm(qln2, 0, 0, 1, 0, qb, qc);
+    gemmini_config_norm(qln2_inv, 1, 0, 1, 0, qb, qc);
+  }
+
+  // TODO(fp): inner 함수 포인터 타입을 sp_tiled_matmul_os_fp/ws_fp 시그니처와 맞춘다.
+  void (*inner)(const elem_t *, const elem_t *, const void *, void *,
+        scale_t, scale_t, scale_acc_t,
+        size_t, size_t, size_t, size_t, size_t, size_t,
+        size_t, size_t, size_t, size_t,
+        bool, bool,
+        bool, bool,
+        bool, bool,
+        int, int, int);
+
+  // TODO(fp): dataflow 선택은 sp_tiled_matmul_os/ws가 아니라 sp_tiled_matmul_os_fp/ws_fp로 연결한다.
+  if (dataflow == OUTPUT_STATIONARY) {
+    inner = &sp_tiled_matmul_os;
+  } else /* if (dataflow == WEIGHT_STATIONARY) */ {
+    inner = &sp_tiled_matmul_ws;
+  }
+
+  // reuse operand if it fits scratchpad
+  int a_spad_id = 0;
+  int b_spad_id = 0;
+  bool b_reuse = (J0 * K0 <= 2) && (dataflow == WEIGHT_STATIONARY);
+  bool a_reuse = (I0 * K0 <= 2) && (dataflow == WEIGHT_STATIONARY);
+#if GEMMINI_DISABLE_WS_REUSE
+  if (dataflow == WEIGHT_STATIONARY) {
+    a_reuse = false;
+    b_reuse = false;
+  }
+#endif
+
+#if GEMMINI_WS_DEBUG
+  if (dataflow == WEIGHT_STATIONARY) {
+      gemmini_log_debug(
+        "[ws.outer] dim=(%zu,%zu,%zu) tile=(%zu,%zu,%zu) iter=(%zu,%zu,%zu) pad=(%zu,%zu,%zu) "
+        "stride=(%zu,%zu,%zu,%zu) reuse=(A:%d,B:%d) flags=(aT:%d,bT:%d,fullC:%d,lowD:%d,noBias:%d,repeatBias:%d,act:%d)",
+        dim_I, dim_J, dim_K,
+        tile_I, tile_J, tile_K,
+        I0, J0, K0,
+        padding_I, padding_J, padding_K,
+        stride_A, stride_B, stride_D, stride_C,
+        a_reuse ? 1 : 0, b_reuse ? 1 : 0,
+        a_transpose ? 1 : 0, b_transpose ? 1 : 0,
+        full_C ? 1 : 0, low_D ? 1 : 0,
+        no_bias ? 1 : 0, repeating_bias ? 1 : 0,
+        act);
+  }
+#endif
+
+  size_t ws_call_idx = 0;
+
+  for (size_t i0 = 0; i0 < I0; i0++)
+    for (size_t j0 = 0; j0 < J0; j0++)
+      for (size_t k0 = 0; k0 < K0; k0++) {
+        if(a_reuse)
+          a_spad_id = ((i0+k0) == 0) ? 1 : 2;
+        if(b_reuse)
+          b_spad_id = ((j0+k0) == 0) ? 1 : 2;
+
+        // TODO(fp): pre/out 주소 계산에서 int8_t* byte 산술과 elem_t/acc_t 크기 계산을 float 기준으로 바꾼다.
+        const void * pre;
+        if (k0 != 0) {
+          pre = NULL;
+        } else {
+          size_t bias_row = repeating_bias ? 0 : i0*tile_I*DIM;
+          // pre = &(((acc_t*)D)[bias_row * stride_D + j0 * tile_J * DIM]);
+          pre = (int8_t*)D + (bias_row * stride_D + j0 * tile_J * DIM)*sizeof_D;
+        }
+
+        void * out = k0 == K0-1 ? (int8_t*)C + (i0*tile_I*DIM*stride_C + j0*tile_J*DIM)*sizeof_C : NULL;
+
+        const size_t I = i0 < I0-1 ? tile_I : last_I;
+        const size_t J = j0 < J0-1 ? tile_J : last_J;
+        const size_t K = k0 < K0-1 ? tile_K : last_K;
+
+        const size_t pad_I = i0 == I0-1 ? padding_I : 0;
+        const size_t pad_J = j0 == J0-1 ? padding_J : 0;
+        const size_t pad_K = k0 == K0-1 ? padding_K : 0;
+
+  // TODO(fp): tile별 A/B/pre/out 주소 계산에서 int8_t* byte 산술과 elem_t/acc_t 크기 계산을 float 기준으로 바꾼다.
+        const elem_t * a = a_transpose ? (A + k0*tile_K*DIM*stride_A + i0*tile_I*DIM)
+          : (A + i0*tile_I*DIM*stride_A + k0*tile_K*DIM);
+
+        const elem_t * b = b_transpose ? (B + j0*tile_J*DIM*stride_B + k0*tile_K*DIM)
+          : (B + k0*tile_K*DIM*stride_B + j0*tile_J*DIM);
+
+        if(a_reuse && j0 >= 1) a = NULL;
+        if(b_reuse && i0 >= 1) b = NULL;
+
+#if GEMMINI_WS_DEBUG
+        if (dataflow == WEIGHT_STATIONARY) {
+          gemmini_log_debug(
+              "[ws.inner.begin] idx=%zu i0=%zu j0=%zu k0=%zu IJK=(%zu,%zu,%zu) pad=(%zu,%zu,%zu) "
+              "ptr=(A:%p,B:%p,pre:%p,out:%p) spad=(%d,%d) reuse=(A:%d,B:%d)",
+              ws_call_idx, i0, j0, k0,
+              I, J, K,
+              pad_I, pad_J, pad_K,
+              (const void *)a, (const void *)b, pre, out,
+              a_spad_id, b_spad_id,
+              a_reuse ? 1 : 0, b_reuse ? 1 : 0);
+        }
+#endif
+        //printf("a_reuse: %d, b_reuse: %d, a_spad_id: %d, b_spad_id: %d, a: %llu, b: %llu \n", a_reuse, b_reuse, a_spad_id, b_spad_id, a, b);
+        (*inner)(a, b, pre, out,
+            A_scale_factor, B_scale_factor, D_scale_factor,
+            I, J, K,
+            pad_I, pad_J, pad_K,
+            stride_A, stride_B, stride_D, stride_C,
+            a_transpose, b_transpose,
+            full_C, low_D,
+            no_bias, repeating_bias,
+            act, a_spad_id, b_spad_id);
+
+#if GEMMINI_WS_DEBUG
+        if (dataflow == WEIGHT_STATIONARY) {
+          gemmini_log_debug("[ws.inner.end] idx=%zu i0=%zu j0=%zu k0=%zu", ws_call_idx, i0, j0, k0);
+        }
+#endif
+        ++ws_call_idx;
+      }
+
+  gemmini_fence();
+}
+
 
   // tiled matrix mulctiplication fp x fp
   static void tiled_matmul_fp(size_t dim_I, size_t dim_J, size_t dim_K,
         const float* A, const float* B,
         const float* D, float* C,
         size_t stride_A, size_t stride_B, size_t stride_D, size_t stride_C,
+        scale_t A_scale_factor, scale_t B_scale_factor, scale_acc_t D_scale_factor,
+        int act, acc_scale_t scale, acc_scale_t bert_scale,
+        bool repeating_bias,
         size_t tile_I, size_t tile_J, size_t tile_K,
         bool transpose_A, bool transpose_B,
+        bool full_C, bool low_D,
+        uint8_t weightA,
         enum tiled_matmul_type_t tiled_matmul_type) {
     if (tiled_matmul_type == OS || tiled_matmul_type == WS) {
       tiled_matmul_outer_fp(dim_I, dim_J, dim_K,
           A, B, D, C,
           stride_A, stride_B, stride_D, stride_C,
+          A_scale_factor, B_scale_factor, D_scale_factor,
           tile_I, tile_J, tile_K,
+          act, scale, bert_scale, repeating_bias,
           transpose_A, transpose_B,
-          tiled_matmul_type);
+          full_C, low_D,
+          weightA,
+          (int)tiled_matmul_type);
     } else {
       matmul_cpu_fp(transpose_A, transpose_B, dim_I, dim_J, dim_K,
           A, B, D, C,
@@ -1726,59 +2084,83 @@ static size_t tiled_matmul_total_acc_rows(size_t I, size_t J) {
 
 namespace ggml { namespace gemmini {
   // fp x fp gemmini. baseline system
-  // TODO: 김동현
-  static void tiled_matmul_auto_fp(struct ggml_gemmini_args_t *args)
-  {
-    const char *layer = ggml::gemmini::types::to_string(args->layer_type);
-
-    // tile size와 block size 매칭을 통해, tiled별 연산 결과를 dequantize해서 llama.cpp의 output으로 전달
-    uint64_t start = ggml::gemmini::cycle::read();
+  static void tiled_matmul_auto_fp(struct ggml_gemmini_args_t *args) {
     if (args == NULL)
       return;
 
     const size_t dim_I = args->I;
     const size_t dim_J = args->J;
     const size_t dim_K = args->K;
+    if (dim_I == 0 || dim_J == 0 || dim_K == 0)
+      return;
 
     const enum tiled_matmul_type_t tiled_matmul_type = args->tiled_matmul_type;
     const int act = args->act;
 
-    size_t tile_I = args->tile_I;
-    size_t tile_J = args->tile_J;
-    size_t tile_K = args->tile_K;
+    const size_t partition_rows_fp = BANK_NUM * BANK_ROWS / 2;
+    const size_t mats_in_partition_fp = partition_rows_fp / DIM;
+    const size_t mats_in_acc_fp = ACC_ROWS / DIM;
+    const size_t max_tile_i_j_fp = (size_t)sqrt(mats_in_acc_fp);
+    const size_t max_tile_k_fp = mats_in_partition_fp / max_tile_i_j_fp;
 
-    const bool cpu_fallback = tiled_matmul_type == CPU;
+    const size_t db_partition_rows_fp = (BANK_NUM * BANK_ROWS / 2) / 2;
+    const size_t db_mats_in_partition_fp = db_partition_rows_fp / DIM;
+    const size_t db_mats_in_acc_fp = (ACC_ROWS / 2) / DIM;
+    const size_t db_max_tile_i_j_fp = (size_t)sqrt(db_mats_in_acc_fp);
+    const size_t db_max_tile_k_fp = db_mats_in_partition_fp / db_max_tile_i_j_fp;
 
-      start = ggml::gemmini::cycle::read();
-      // auto tiling으로 선정된 K 타일을 block에 매칭하여 bloctile_k_K를 사용해 호출
-      /* if (cpu_fallback)
-      {
-        matmul_cpu_fp(dim_I, dim_J, dim_K,
-                           A_block, B_block, D_block, acc_ptr,
-                           block_stride_A, block_stride_B, args->sD, dim_J,
-                           1.0f, 1.0f, args->scale_D,
-                           act, args->scale, args->bert_scale, args->repeating_bias,
-                           tile_I, tile_J, bloctile_k_K,
-                           args->transpose_A, args->transpose_B,
-                           true, args->low_D,
-                           args->weightA,
-                           tiled_matmul_type);
+    const size_t dim_I_padded = (dim_I / DIM + (dim_I % DIM != 0)) * DIM;
+    const size_t dim_J_padded = (dim_J / DIM + (dim_J % DIM != 0)) * DIM;
+    const size_t dim_K_padded = (dim_K / DIM + (dim_K % DIM != 0)) * DIM;
+
+    const bool double_buffered = tiled_matmul_type == WS;
+
+    const size_t max_spad_rows = double_buffered ? BANK_NUM * BANK_ROWS / 2 :
+      BANK_NUM * BANK_ROWS;
+    const size_t max_acc_rows = double_buffered ? ACC_ROWS / 2 : ACC_ROWS;
+
+    size_t tile_I, tile_J, tile_K;
+
+    if (act == LAYERNORM || act == SOFTMAX) {
+       tile_I = 1;
+       tile_J = dim_J_padded/DIM;
+       tile_K = 1;
+    } else if (double_buffered) {
+       tile_I = dim_I_padded/DIM < db_max_tile_i_j_fp ? dim_I_padded/DIM : db_max_tile_i_j_fp;
+       tile_J = dim_J_padded/DIM < db_max_tile_i_j_fp ? dim_J_padded/DIM : db_max_tile_i_j_fp;
+       tile_K = dim_K_padded/DIM < db_max_tile_k_fp ? dim_K_padded/DIM : db_max_tile_k_fp;
+    } else {
+       tile_I = dim_I_padded/DIM < max_tile_i_j_fp ? dim_I_padded/DIM : max_tile_i_j_fp;
+       tile_J = dim_J_padded/DIM < max_tile_i_j_fp ? dim_J_padded/DIM : max_tile_i_j_fp;
+       tile_K = dim_K_padded/DIM < max_tile_k_fp ? dim_K_padded/DIM : max_tile_k_fp;
+    }
+
+    while (true) {
+      bool increased = false;
+
+      if (tiled_matmul_total_spad_rows(tile_I, tile_J+1, tile_K) <= max_spad_rows &&
+          tiled_matmul_total_acc_rows(tile_I, tile_J+1) <= max_acc_rows &&
+          (tile_J+1) * DIM <= dim_J_padded) {
+        tile_J++;
+        increased = true;
       }
-      else
-      {
-        tiled_matmul(dim_I, dim_J, dim_K,
-                     A_block, B_block, D_block, acc_ptr,
-                     block_stride_A, block_stride_B, args->sD, dim_J,
-                     1.0f, 1.0f, args->scale_D,
-                     act, args->scale, args->bert_scale, args->repeating_bias,
-                     tile_I, tile_J, bloctile_k_K,
-                     args->transpose_A, args->transpose_B,
-                     args->full_C, args->low_D,
-                     args->weightA,
-                     tiled_matmul_type);
-      } */
-      uint64_t end = ggml::gemmini::cycle::read();
-      gemmini_log_cycle(layer, "[tiled_matmul_auto_fp32] npu.Gemmini HW tiled_matmul", start, end);
+
+      if (tiled_matmul_total_spad_rows(tile_I+1, tile_J, tile_K) <= max_spad_rows &&
+          tiled_matmul_total_acc_rows(tile_I+1, tile_J) <= max_acc_rows &&
+          (tile_I+1) * DIM <= dim_I_padded) {
+        tile_I++;
+        increased = true;
+      }
+
+      if (tiled_matmul_total_spad_rows(tile_I, tile_J, tile_K+1) <= max_spad_rows &&
+          (tile_K+1) * DIM <= dim_K_padded) {
+        tile_K++;
+        increased = true;
+      }
+
+      if (!increased)
+        break;
+    }
 
 #ifdef PRINT_TILE
 #if PRINT_TILE
@@ -1799,6 +2181,24 @@ namespace ggml { namespace gemmini {
 #endif
 #endif
 
+    const float *A = args->A_fp;
+    const float *B = args->B_fp;
+    const float *D = args->D_fp;
+    float *C = args->C_fp != NULL ? args->C_fp : args->f_out;
+    if (A == NULL || B == NULL || C == NULL)
+      return;
+
+    tiled_matmul_fp(dim_I, dim_J, dim_K,
+        A, B, D, C,
+        args->sA, args->sB, args->sD,
+        args->stride_f_out ? args->stride_f_out : dim_J,
+        1.0f, args->scale_B, args->scale_D,
+        args->act, args->scale, args->bert_scale, args->repeating_bias,
+        tile_I, tile_J, tile_K,
+        args->transpose_A, args->transpose_B,
+        args->full_C, args->low_D,
+        args->weightA,
+        args->tiled_matmul_type);
   }
 
   namespace gemmini_detail {
