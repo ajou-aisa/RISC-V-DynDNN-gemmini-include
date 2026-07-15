@@ -2488,10 +2488,90 @@ namespace ggml { namespace gemmini {
     gemmini_log_cycle(layer, "[tiled_matmul_auto_A-tensor_B-tensor] dense_i8 tiled matmul", start, end);
   }
 
+  static void tiled_matmul_auto_A_token_B_tensor(struct ggml_gemmini_args_t *args) {
+    GGML_ASSERT(args != nullptr);
+    GGML_ASSERT(args->B != nullptr &&
+                args->weight_i8_scale_active &&
+                args->transpose_B &&
+                args->sB == args->K &&
+                std::isfinite(args->weight_scale) &&
+                args->weight_scale > 0.0f &&
+                "TOKEN/TENSOR requires dense row-major I8 weights with a finite positive scalar scale");
+
+    const auto *token_meta =
+        std::get_if<ggml::gemmini::quants::act::token::Meta>(&args->act_quant.storage());
+    GGML_ASSERT(token_meta != nullptr && "TOKEN/TENSOR requires token::Meta");
+    GGML_ASSERT(token_meta->scales.size() == args->I &&
+                std::all_of(token_meta->scales.begin(), token_meta->scales.end(),
+                            [](float scale) { return std::isfinite(scale) && scale > 0.0f; }) &&
+                "TOKEN/TENSOR requires one finite positive activation scale per row");
+
+    if (args->A == nullptr || args->f_out == nullptr)
+      return;
+
+    const size_t dim_I = args->I;
+    const size_t dim_J = args->J;
+    const size_t dim_K = args->K;
+    if (dim_I == 0 || dim_J == 0 || dim_K == 0)
+      return;
+
+    GGML_ASSERT(args->act == NO_ACTIVATION);
+
+    if (args->tile_I == 0 || args->tile_J == 0 || args->tile_K == 0)
+      gemmini_set_tile(args);
+
+    const char *layer = ggml::gemmini::types::to_string(args->layer_type);
+    const uint64_t start = ggml::gemmini::cycle::read();
+    const elem_t *A = args->A;
+    const elem_t *B = args->B;
+    const size_t stride_A = args->sA ? args->sA : dim_K;
+    const size_t row_stride_B = args->sB;
+    const size_t out_row_stride = args->stride_f_out ? args->stride_f_out : dim_J;
+    const size_t out_col_stride = args->col_stride_f_out ? args->col_stride_f_out : 1;
+    std::vector<acc_t> acc32(dim_I * dim_J, 0);
+
+    if (args->tiled_matmul_type != CPU)
+    {
+      tiled_matmul(dim_I, dim_J, dim_K,
+          A, B, args->D, acc32.data(),
+          stride_A, row_stride_B, args->sD, dim_J,
+          1.0f, args->scale_B, args->scale_D,
+          args->act, args->scale, args->bert_scale, args->repeating_bias,
+          args->tile_I, args->tile_J, args->tile_K,
+          args->transpose_A, args->transpose_B,
+          true, args->low_D,
+          args->weightA,
+          args->tiled_matmul_type);
+    } else
+    {
+      for (size_t i = 0; i < dim_I; ++i)
+        for (size_t j = 0; j < dim_J; ++j)
+        {
+          int32_t acc = 0;
+          for (size_t k = 0; k < dim_K; ++k)
+          {
+            const elem_t a = args->transpose_A ? A[k * stride_A + i] : A[i * stride_A + k];
+            acc += static_cast<int32_t>(a) * static_cast<int32_t>(B[j * row_stride_B + k]);
+          }
+          acc32[i * dim_J + j] = acc;
+        }
+    }
+
+    for (size_t i = 0; i < dim_I; ++i)
+      for (size_t j = 0; j < dim_J; ++j)
+        args->f_out[i * out_row_stride + j * out_col_stride] = 0.0f;
+
+    ggml::gemmini::dequantize(*args, 0, dim_K, acc32.data(), dim_J);
+
+    const uint64_t end = ggml::gemmini::cycle::read();
+    gemmini_log_cycle(layer, "[tiled_matmul_auto_A-token_B-tensor] dense_i8 tiled matmul", start, end);
+  }
+
   enum class baseline_activation_quant_t : uint8_t {
     FLOAT = 0,
     EXSIA,
     TENSOR,
+    TOKEN,
   };
 
   enum class baseline_weight_quant_t : uint8_t {
@@ -2517,6 +2597,12 @@ namespace ggml { namespace gemmini {
     if (activation_quant == baseline_activation_quant_t::TENSOR &&
         weight_quant == baseline_weight_quant_t::TENSOR) {
       tiled_matmul_auto_A_tensor_B_tensor(args);
+      return;
+    }
+
+    if (activation_quant == baseline_activation_quant_t::TOKEN &&
+        weight_quant == baseline_weight_quant_t::TENSOR) {
+      tiled_matmul_auto_A_token_B_tensor(args);
       return;
     }
 
