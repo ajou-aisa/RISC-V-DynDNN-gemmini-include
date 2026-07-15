@@ -2299,7 +2299,7 @@ namespace ggml { namespace gemmini {
 
   // baseline system.
   // activation: ExSIA, weight: per-tensor
-  static void tiled_matmul_auto_exsia(struct ggml_gemmini_args_t *args) {
+  static void tiled_matmul_auto_A_exsia_B_tensor(struct ggml_gemmini_args_t *args) {
     if (args == NULL)
       return;
 
@@ -2343,14 +2343,14 @@ namespace ggml { namespace gemmini {
     const int exsia_threads = use_exsia_openmp ? resolve_exsia_threads(output_count) : 1;
     if (use_exsia_openmp)
       gemmini_log_debug_layer(layer,
-          "[tiled_matmul_auto_exsia] openmp outputs=%zu threads=%d mode=%s",
+          "[tiled_matmul_auto_A-exsia_B-tensor] openmp outputs=%zu threads=%d mode=%s",
           output_count, exsia_threads,
           args->tiled_matmul_type == CPU ? "cpu" : "npu-dequant");
 #else
     const bool use_exsia_openmp = false;
 #endif
     gemmini_log_debug_layer(layer,
-        "[tiled_matmul_auto_exsia] dim=(I=%zu,J=%zu,K=%zu) tile_rows=%zu num_i_tiles=%zu "
+        "[tiled_matmul_auto_A-exsia_B-tensor] dim=(I=%zu,J=%zu,K=%zu) tile_rows=%zu num_i_tiles=%zu "
         "weight_scale=%.9f sB=%zu mode=%s",
         dim_I, dim_J, dim_K, tile_rows, num_i_tiles,
         static_cast<double>(args->weight_scale), row_stride_B,
@@ -2408,8 +2408,8 @@ namespace ggml { namespace gemmini {
     uint64_t end = ggml::gemmini::cycle::read();
     gemmini_log_cycle(layer,
         args->tiled_matmul_type == CPU ?
-            "[tiled_matmul_auto_exsia] cpu.dense_i8 tiled matmul" :
-            "[tiled_matmul_auto_exsia] npu.dense_i8 tiled matmul",
+            "[tiled_matmul_auto_A-exsia_B-tensor] cpu.dense_i8 tiled matmul" :
+            "[tiled_matmul_auto_A-exsia_B-tensor] npu.dense_i8 tiled matmul",
         start, end);
 
   }
@@ -2417,7 +2417,7 @@ namespace ggml { namespace gemmini {
   // per-tensor implementation. baseline system.
   // activation: per-tensor, weight: per-tensor
   // TODO: 조찬혁
-  static void tiled_matmul_auto_tensor(struct ggml_gemmini_args_t *args){
+  static void tiled_matmul_auto_A_tensor_B_tensor(struct ggml_gemmini_args_t *args){
     // tiled_matmul_auto를 참고하여, gemmini 호출 후 연산 결과를 per-tensor dequantize하도록 구현. 
     if (args == NULL)
       return;
@@ -2485,7 +2485,7 @@ namespace ggml { namespace gemmini {
     ggml::gemmini::dequantize(*args, 0, dim_K, acc32.data(), dim_J);
 
     uint64_t end = ggml::gemmini::cycle::read();
-    gemmini_log_cycle(layer, "[tiled_matmul_auto_tensor] dense_i8 tiled matmul", start, end);
+    gemmini_log_cycle(layer, "[tiled_matmul_auto_A-tensor_B-tensor] dense_i8 tiled matmul", start, end);
   }
 
   enum class baseline_activation_quant_t : uint8_t {
@@ -2496,7 +2496,7 @@ namespace ggml { namespace gemmini {
 
   enum class baseline_weight_quant_t : uint8_t {
     FLOAT = 0,
-    PER_TENSOR,
+    TENSOR,
   };
 
   static void tiled_matmul_auto_baseline(struct ggml_gemmini_args_t *args,
@@ -2509,14 +2509,14 @@ namespace ggml { namespace gemmini {
     }
 
     if (activation_quant == baseline_activation_quant_t::EXSIA &&
-        weight_quant == baseline_weight_quant_t::PER_TENSOR) {
-      tiled_matmul_auto_exsia(args);
+        weight_quant == baseline_weight_quant_t::TENSOR) {
+      tiled_matmul_auto_A_exsia_B_tensor(args);
       return;
     }
 
     if (activation_quant == baseline_activation_quant_t::TENSOR &&
-        weight_quant == baseline_weight_quant_t::PER_TENSOR) {
-      tiled_matmul_auto_tensor(args);
+        weight_quant == baseline_weight_quant_t::TENSOR) {
+      tiled_matmul_auto_A_tensor_B_tensor(args);
       return;
     }
 
