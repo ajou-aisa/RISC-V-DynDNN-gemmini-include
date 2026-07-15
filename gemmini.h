@@ -2488,6 +2488,41 @@ namespace ggml { namespace gemmini {
     gemmini_log_cycle(layer, "[tiled_matmul_auto_tensor] dense_i8 tiled matmul", start, end);
   }
 
+  enum class baseline_activation_quant_t : uint8_t {
+    FLOAT = 0,
+    EXSIA,
+    TENSOR,
+  };
+
+  enum class baseline_weight_quant_t : uint8_t {
+    FLOAT = 0,
+    PER_TENSOR,
+  };
+
+  static void tiled_matmul_auto_baseline(struct ggml_gemmini_args_t *args,
+                                         baseline_activation_quant_t activation_quant,
+                                         baseline_weight_quant_t weight_quant) {
+    if (activation_quant == baseline_activation_quant_t::FLOAT &&
+        weight_quant == baseline_weight_quant_t::FLOAT) {
+      tiled_matmul_auto_fp(args);
+      return;
+    }
+
+    if (activation_quant == baseline_activation_quant_t::EXSIA &&
+        weight_quant == baseline_weight_quant_t::PER_TENSOR) {
+      tiled_matmul_auto_exsia(args);
+      return;
+    }
+
+    if (activation_quant == baseline_activation_quant_t::TENSOR &&
+        weight_quant == baseline_weight_quant_t::PER_TENSOR) {
+      tiled_matmul_auto_tensor(args);
+      return;
+    }
+
+    GGML_ASSERT(false && "unsupported Gemmini baseline quantization pair");
+  }
+
 }} // namespace ggml::gemmini
 
 // This function runs a tiled matrix multiplication, with automatically
