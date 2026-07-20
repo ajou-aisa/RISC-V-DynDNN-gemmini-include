@@ -2257,7 +2257,7 @@ namespace ggml { namespace gemmini {
                   if (block == nullptr)
                     continue;
 
-                  const double weight_scale = block->m == INT16_MIN ? 0.0 : static_cast<double>(std::ldexp(block->channel_scale, block->m));
+                  const double weight_scale = block->m == INT16_MIN ? 0.0 : static_cast<double>(gemmini_ldexp_fast_pos(block->channel_scale, block->m));
                   for (size_t kk = 0; kk < block_k_actual; ++kk)
                     block_dot += a_row_i32[kk] * static_cast<int32_t>(block->qs[k_in_weight_block + kk]);
                   native_block_sum = static_cast<double>(block_dot) * weight_scale;
@@ -2268,7 +2268,7 @@ namespace ggml { namespace gemmini {
                   if (block == nullptr)
                     continue;
 
-                  const double weight_scale = block->m == INT16_MIN ? 0.0 : static_cast<double>(std::ldexp(block->channel_scale, block->m));
+                  const double weight_scale = block->m == INT16_MIN ? 0.0 : static_cast<double>(gemmini_ldexp_fast_pos(block->channel_scale, block->m));
                   for (size_t kk = 0; kk < block_k_actual; ++kk)
                     block_dot += a_row_i32[kk] * static_cast<int32_t>(block->qs[k_in_weight_block + kk]);
                   native_block_sum = static_cast<double>(block_dot) * weight_scale;
