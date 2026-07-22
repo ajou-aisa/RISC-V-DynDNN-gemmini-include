@@ -2199,6 +2199,8 @@ namespace ggml { namespace gemmini {
               tile_i, tile_k, tile_i_actual, tile_k_actual);
         }
 
+        std::vector<double> native_scale_lut;        // (j,weight_blk)당 1회 계산, i-루프 밖으로 hoist
+        std::vector<const int8_t *> native_qs_lut;   // qs 포인터도 hoist: 포맷 무관 단일 핫 루프
         for (size_t k_block = 0; k_block < tile_k_actual;)
         {
           const size_t global_k = tile_k + k_block;
@@ -2209,6 +2211,41 @@ namespace ggml { namespace gemmini {
           {
             k_block += block_k_actual;
             continue;
+          }
+
+          if (native_q8)
+          {
+            native_scale_lut.assign(tile_j_actual, 0.0);
+            native_qs_lut.assign(tile_j_actual, nullptr);
+            for (size_t j = 0; j < tile_j_actual; ++j)
+            {
+              const size_t global_j = tile_j + j;
+              if (global_j >= scale_rows) continue;
+              switch (args->weight_format) {
+                case ggml_gemmini_args_t::im2p_weight_format_t::q8_h1: {
+                  const block_q8_h1 *b = args->q8_h1_block(global_j, weight_blk);
+                  if (b) { native_scale_lut[j] = static_cast<double>(b->s_rf) *
+                      static_cast<double>(static_cast<uint32_t>(b->c_b) + static_cast<uint32_t>(b->R));
+                      native_qs_lut[j] = b->qs; }
+                  break; }
+                case ggml_gemmini_args_t::im2p_weight_format_t::q8_h2: {
+                  const block_q8_h2 *b = args->q8_h2_block(global_j, weight_blk);
+                  if (b) { native_scale_lut[j] = static_cast<double>(b->channel_scale) * static_cast<double>(b->m) / 255.0;
+                      native_qs_lut[j] = b->qs; }
+                  break; }
+                case ggml_gemmini_args_t::im2p_weight_format_t::q8_hp1: {
+                  const block_q8_hp1 *b = args->q8_hp1_block(global_j, weight_blk);
+                  if (b) { native_scale_lut[j] = b->m == INT16_MIN ? 0.0 : static_cast<double>(gemmini_ldexp_fast_pos(b->channel_scale, b->m));
+                      native_qs_lut[j] = b->qs; }
+                  break; }
+                case ggml_gemmini_args_t::im2p_weight_format_t::q8_hp2: {
+                  const block_q8_hp2 *b = args->q8_hp2_block(global_j, weight_blk);
+                  if (b) { native_scale_lut[j] = b->m == INT16_MIN ? 0.0 : static_cast<double>(gemmini_ldexp_fast_pos(b->channel_scale, b->m));
+                      native_qs_lut[j] = b->qs; }
+                  break; }
+                default: break;
+              }
+            }
           }
 
           for (size_t i = 0; i < tile_i_actual; ++i)
@@ -2228,51 +2265,14 @@ namespace ggml { namespace gemmini {
               double native_block_sum = 0.0;
               if (native_q8)
               {
-                if (args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h1)
-                {
-                  const block_q8_h1 *block = args->q8_h1_block(global_j, weight_blk);
-                  if (block == nullptr)
-                    continue;
+                const int8_t *qs = native_qs_lut[j];
+                if (qs == nullptr)
+                  continue;
 
-                  const double weight_scale = static_cast<double>(block->s_rf) *
-                      static_cast<double>(static_cast<uint32_t>(block->c_b) + static_cast<uint32_t>(block->R));
-                  for (size_t kk = 0; kk < block_k_actual; ++kk)
-                    block_dot += a_row_i32[kk] * static_cast<int32_t>(block->qs[k_in_weight_block + kk]);
-                  native_block_sum = static_cast<double>(block_dot) * weight_scale;
-                }
-                else if (args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h2)
-                {
-                  const block_q8_h2 *block = args->q8_h2_block(global_j, weight_blk);
-                  if (block == nullptr)
-                    continue;
-
-                  const double weight_scale = static_cast<double>(block->channel_scale) * static_cast<double>(block->m) / 255.0;
-                  for (size_t kk = 0; kk < block_k_actual; ++kk)
-                    block_dot += a_row_i32[kk] * static_cast<int32_t>(block->qs[k_in_weight_block + kk]);
-                  native_block_sum = static_cast<double>(block_dot) * weight_scale;
-                }
-                else if (args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_hp1)
-                {
-                  const block_q8_hp1 *block = args->q8_hp1_block(global_j, weight_blk);
-                  if (block == nullptr)
-                    continue;
-
-                  const double weight_scale = block->m == INT16_MIN ? 0.0 : static_cast<double>(gemmini_ldexp_fast_pos(block->channel_scale, block->m));
-                  for (size_t kk = 0; kk < block_k_actual; ++kk)
-                    block_dot += a_row_i32[kk] * static_cast<int32_t>(block->qs[k_in_weight_block + kk]);
-                  native_block_sum = static_cast<double>(block_dot) * weight_scale;
-                }
-                else
-                {
-                  const block_q8_hp2 *block = args->q8_hp2_block(global_j, weight_blk);
-                  if (block == nullptr)
-                    continue;
-
-                  const double weight_scale = block->m == INT16_MIN ? 0.0 : static_cast<double>(gemmini_ldexp_fast_pos(block->channel_scale, block->m));
-                  for (size_t kk = 0; kk < block_k_actual; ++kk)
-                    block_dot += a_row_i32[kk] * static_cast<int32_t>(block->qs[k_in_weight_block + kk]);
-                  native_block_sum = static_cast<double>(block_dot) * weight_scale;
-                }
+                const double weight_scale = native_scale_lut[j];
+                for (size_t kk = 0; kk < block_k_actual; ++kk)
+                  block_dot += a_row_i32[kk] * static_cast<int32_t>(qs[k_in_weight_block + kk]);
+                native_block_sum = static_cast<double>(block_dot) * weight_scale;
 
                 acc_fp[i * tile_j_actual + j] += native_block_sum;
                 continue;
