@@ -2263,7 +2263,6 @@ namespace ggml { namespace gemmini {
               const elem_t *b_block = native_q8 ? nullptr : B + global_j * row_stride_B + global_k;
               int32_t block_dot = 0;
               double native_block_sum = 0.0;
-              uint64_t dot_loop_t0 = (j == 0 && i == 0) ? ggml::gemmini::cycle::read() : 0;
               if (native_q8)
               {
                 const int8_t *qs = native_qs_lut[j];
@@ -2275,14 +2274,6 @@ namespace ggml { namespace gemmini {
                   block_dot += a_row_i32[kk] * static_cast<int32_t>(qs[k_in_weight_block + kk]);
                 native_block_sum = static_cast<double>(block_dot) * weight_scale;
 
-                if (j == 0 && i == 0) {
-                    const char * im2p_dot_label =
-                        args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h1 ? "[im2p.dot-1blk Q8_H1]"
-                        : args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h2 ? "[im2p.dot-1blk Q8_H2]"
-                        : args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_hp1 ? "[im2p.dot-1blk Q8_HP1]"
-                        : "[im2p.dot-1blk Q8_HP2]";
-                    ggml::gemmini::log::cycle(layer, im2p_dot_label, dot_loop_t0, ggml::gemmini::cycle::read());
-                }
                 acc_fp[i * tile_j_actual + j] += native_block_sum;
                 continue;
               }
