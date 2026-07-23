@@ -2030,6 +2030,30 @@ namespace ggml { namespace gemmini {
     const auto *activation_meta = std::get_if<ggml::gemmini::quants::act::exsia::Meta>(&args->act_quant.storage());
     const auto *tensor_meta = std::get_if<ggml::gemmini::quants::act::tensor::Meta>(&args->act_quant.storage());
     const auto *token_meta = std::get_if<ggml::gemmini::quants::act::token::Meta>(&args->act_quant.storage());
+    const auto *stripe_meta = std::get_if<ggml::gemmini::quants::act::stripe::Meta>(&args->act_quant.storage());
+
+    if (stripe_meta != nullptr)
+    {
+      const size_t rows_per_stripe = tile_I * DIM;
+      const size_t expected_scale_count = (dim_I + rows_per_stripe - 1) / rows_per_stripe;
+      if (stripe_meta->scales.size() != expected_scale_count)
+      {
+        gemmini_log_debug_layer(layer,
+            "[tiled_block_matmul_auto] reject STRIPE activation scale cardinality: got=%zu expected=%zu",
+            stripe_meta->scales.size(), expected_scale_count);
+        return;
+      }
+      for (const float scale : stripe_meta->scales)
+      {
+        if (!std::isfinite(scale) || scale <= 0.0f)
+        {
+          gemmini_log_debug_layer(layer,
+              "[tiled_block_matmul_auto] reject STRIPE activation scale value: scale=%g",
+              static_cast<double>(scale));
+          return;
+        }
+      }
+    }
 
     if (native_q8)
     {
@@ -2338,9 +2362,11 @@ namespace ggml { namespace gemmini {
       }
 
       const int16_t tile_activation_e_s = activation_meta ? activation_meta->resolve_stripe_theta(tile_row_idx) : 0;
-      const float activation_scale = activation_meta
-          ? gemmini_detail::apply_activation_exponent(1.0f, tile_activation_e_s, 0)
-          : (tensor_meta ? tensor_meta->scale : 1.0f);
+      const float activation_scale = stripe_meta
+          ? stripe_meta->scales[tile_i_idx]
+          : (activation_meta
+                ? gemmini_detail::apply_activation_exponent(1.0f, tile_activation_e_s, 0)
+                : (tensor_meta ? tensor_meta->scale : 1.0f));
       const ggml::gemmini::quants::Stripe output_stripe(tile_i_actual, tile_j_actual, tile_i, tile_j);
       float *stripe_out = args->f_out + tile_i * out_row_stride + tile_j * out_col_stride;
 
