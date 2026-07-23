@@ -39,6 +39,7 @@
 #include <gemmini/cycle_reader.hpp>
 #include <gemmini/layer.hpp>
 #include "quants/stripe.hpp"
+#include "quants/act/dispatch.hpp"
 #include "quants/common/dequant.hpp"
 
 #define k_CONFIG 0
@@ -2444,319 +2445,297 @@ namespace ggml { namespace gemmini {
       return;
 
     const char *layer = ggml::gemmini::types::to_string(args->layer_type);
-    if (args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_hp1)
+    const char *cpu_cycle_label = nullptr;
+    const char *ws_cycle_label = nullptr;
+    const char *os_message = nullptr;
+
+    switch (args->weight_format)
     {
-      if (args->tiled_matmul_type == CPU)
-      {
-        tiled_matmul_im2p_impl(args, true, "[tiled_matmul_auto_im2p] cpu.Q8_HP1 tiled matmul");
-        return;
-      }
-      if (args->tiled_matmul_type == WS)
-      {
-        tiled_matmul_im2p_impl(args, false, "[tiled_matmul_im2p_ws] ws-sim.Q8_HP1 tiled matmul");
-        return;
-      }
-
-    gemmini_log_debug_layer(layer, "[tiled_matmul_auto_im2p] Q8_HP1 OS mode is unsupported");
-      return;
-    }
-
-    if (args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_hp2)
-    {
-      if (args->tiled_matmul_type == CPU)
-      {
-        tiled_matmul_im2p_impl(args, true, "[tiled_matmul_auto_im2p] cpu.Q8_HP2 tiled matmul");
-        return;
-      }
-      if (args->tiled_matmul_type == WS)
-      {
-        tiled_matmul_im2p_impl(args, false, "[tiled_matmul_im2p_ws] ws-sim.Q8_HP2 tiled matmul");
-        return;
-      }
-
-    gemmini_log_debug_layer(layer, "[tiled_matmul_auto_im2p] Q8_HP2 OS mode is unsupported");
-      return;
-    }
-
-    if (args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h2)
-    {
-      if (args->tiled_matmul_type == CPU)
-      {
-        tiled_matmul_im2p_impl(args, true, "[tiled_matmul_auto_im2p] cpu.Q8_H2 tiled matmul");
-        return;
-      }
-      if (args->tiled_matmul_type == WS)
-      {
-        tiled_matmul_im2p_impl(args, false, "[tiled_matmul_im2p_ws] ws-sim.Q8_H2 tiled matmul");
-        return;
-      }
-
-      gemmini_log_debug_layer(layer, "[tiled_matmul_auto_im2p] Q8_H2 OS mode is unsupported");
-      return;
-    }
-
-    if (args->weight_format != ggml_gemmini_args_t::im2p_weight_format_t::q8_h1)
-    {
-      const int weight_format = static_cast<int>(args->weight_format);
-      if (args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h0)
-      {
+      case ggml_gemmini_args_t::im2p_weight_format_t::q8_h1:
+        cpu_cycle_label = "[tiled_matmul_auto_im2p] cpu.Q8_H1 tiled matmul";
+        ws_cycle_label = "[tiled_matmul_im2p_ws] ws-sim.Q8_H1 tiled matmul";
+        os_message = "[tiled_matmul_auto_im2p] OS mode is unsupported";
+        break;
+      case ggml_gemmini_args_t::im2p_weight_format_t::q8_h2:
+        cpu_cycle_label = "[tiled_matmul_auto_im2p] cpu.Q8_H2 tiled matmul";
+        ws_cycle_label = "[tiled_matmul_im2p_ws] ws-sim.Q8_H2 tiled matmul";
+        os_message = "[tiled_matmul_auto_im2p] Q8_H2 OS mode is unsupported";
+        break;
+      case ggml_gemmini_args_t::im2p_weight_format_t::q8_hp1:
+        cpu_cycle_label = "[tiled_matmul_auto_im2p] cpu.Q8_HP1 tiled matmul";
+        ws_cycle_label = "[tiled_matmul_im2p_ws] ws-sim.Q8_HP1 tiled matmul";
+        os_message = "[tiled_matmul_auto_im2p] Q8_HP1 OS mode is unsupported";
+        break;
+      case ggml_gemmini_args_t::im2p_weight_format_t::q8_hp2:
+        cpu_cycle_label = "[tiled_matmul_auto_im2p] cpu.Q8_HP2 tiled matmul";
+        ws_cycle_label = "[tiled_matmul_im2p_ws] ws-sim.Q8_HP2 tiled matmul";
+        os_message = "[tiled_matmul_auto_im2p] Q8_HP2 OS mode is unsupported";
+        break;
+      case ggml_gemmini_args_t::im2p_weight_format_t::q8_h0:
         gemmini_log_debug_layer(
             layer,
             "[tiled_matmul_auto_im2p] unsupported IM2P weight format=%d (not yet implemented in software path)",
-            weight_format);
-      }
-      else
-      {
+            static_cast<int>(args->weight_format));
+        return;
+      default:
         gemmini_log_debug_layer(layer,
-            "[tiled_matmul_auto_im2p] unsupported IM2P weight format=%d", weight_format);
-      }
-      return;
+            "[tiled_matmul_auto_im2p] unsupported IM2P weight format=%d",
+            static_cast<int>(args->weight_format));
+        return;
     }
 
     if (args->tiled_matmul_type == CPU)
     {
-      tiled_matmul_im2p_impl(args, true, "[tiled_matmul_auto_im2p] cpu.Q8_H1 tiled matmul");
+      tiled_matmul_im2p_impl(args, true, cpu_cycle_label);
       return;
     }
     if (args->tiled_matmul_type == WS)
     {
-      tiled_matmul_im2p_impl(args, false, "[tiled_matmul_im2p_ws] ws-sim.Q8_H1 tiled matmul");
+      tiled_matmul_im2p_impl(args, false, ws_cycle_label);
       return;
     }
 
-    gemmini_log_debug_layer(layer, "[tiled_matmul_auto_im2p] OS mode is unsupported");
+    gemmini_log_debug_layer(layer, os_message);
   }
 
-  // baseline system.
-  // activation: ExSIA, weight: per-tensor
-  static void tiled_matmul_auto_A_exsia_B_tensor(struct ggml_gemmini_args_t *args) {
-    if (args == NULL)
-      return;
+  enum class baseline_activation_quant_t : uint8_t {
+    FLOAT = 0,
+    EXSIA,
+    TENSOR,
+    TOKEN,
+    BLOCK,
+  };
 
-    if (!args->weight_i8_scale_active)
-      return;
+  enum class baseline_weight_quant_t : uint8_t {
+    FLOAT = 0,
+    TENSOR,
+    CHANNEL,
+    BLOCK,
+  };
 
-    const char *layer = ggml::gemmini::types::to_string(args->layer_type);
-    uint64_t start = ggml::gemmini::cycle::read();
+  struct baseline_route_t {
+    baseline_activation_quant_t activation_quant;
+    baseline_weight_quant_t weight_quant;
+    const char *cpu_cycle_label;
+    const char *npu_cycle_label;
+  };
 
-    if (args->A == nullptr || args->B == nullptr || args->f_out == nullptr)
-      return;
+  static const baseline_route_t *baseline_route_for(
+      baseline_activation_quant_t activation_quant,
+      baseline_weight_quant_t weight_quant) {
+    static const baseline_route_t routes[] = {
+      {baseline_activation_quant_t::EXSIA, baseline_weight_quant_t::TENSOR,
+       "[tiled_matmul_auto_A-exsia_B-tensor] cpu.dense_i8 tiled matmul",
+       "[tiled_matmul_auto_A-exsia_B-tensor] npu.dense_i8 tiled matmul"},
+      {baseline_activation_quant_t::TENSOR, baseline_weight_quant_t::TENSOR,
+       "[tiled_matmul_auto_A-tensor_B-tensor] cpu.dense_i8 tiled matmul",
+       "[tiled_matmul_auto_A-tensor_B-tensor] npu.dense_i8 tiled matmul"},
+      {baseline_activation_quant_t::TOKEN, baseline_weight_quant_t::TENSOR,
+       "[tiled_matmul_auto_A-token_B-tensor] cpu.dense_i8 tiled matmul",
+       "[tiled_matmul_auto_A-token_B-tensor] npu.dense_i8 tiled matmul"},
+      {baseline_activation_quant_t::TENSOR, baseline_weight_quant_t::CHANNEL,
+       "[tiled_matmul_auto_baseline] cpu.tensor_channel dense_i8 tiled matmul",
+       "[tiled_matmul_auto_baseline] npu.tensor_channel dense_i8 tiled matmul"},
+      {baseline_activation_quant_t::TENSOR, baseline_weight_quant_t::BLOCK,
+       "[tiled_matmul_auto_baseline] cpu.tensor_block dense_i8 tiled matmul",
+       "[tiled_matmul_auto_baseline] npu.tensor_block dense_i8 tiled matmul"},
+      {baseline_activation_quant_t::TOKEN, baseline_weight_quant_t::CHANNEL,
+       "[tiled_matmul_auto_baseline] cpu.token_channel dense_i8 tiled matmul",
+       "[tiled_matmul_auto_baseline] npu.token_channel dense_i8 tiled matmul"},
+      {baseline_activation_quant_t::TOKEN, baseline_weight_quant_t::BLOCK,
+       "[tiled_matmul_auto_baseline] cpu.token_block dense_i8 tiled matmul",
+       "[tiled_matmul_auto_baseline] npu.token_block dense_i8 tiled matmul"},
+      {baseline_activation_quant_t::BLOCK, baseline_weight_quant_t::TENSOR,
+       "[tiled_matmul_auto_baseline] cpu.block_tensor dense_i8 tiled matmul",
+       "[tiled_matmul_auto_baseline] npu.block_tensor dense_i8 tiled matmul"},
+      {baseline_activation_quant_t::BLOCK, baseline_weight_quant_t::CHANNEL,
+       "[tiled_matmul_auto_baseline] cpu.block_channel dense_i8 tiled matmul",
+       "[tiled_matmul_auto_baseline] npu.block_channel dense_i8 tiled matmul"},
+      {baseline_activation_quant_t::BLOCK, baseline_weight_quant_t::BLOCK,
+       "[tiled_matmul_auto_baseline] cpu.block_block dense_i8 tiled matmul",
+       "[tiled_matmul_auto_baseline] npu.block_block dense_i8 tiled matmul"},
+    };
 
-    const size_t dim_I = args->I;
-    const size_t dim_J = args->J;
-    const size_t dim_K = args->K;
-    if (dim_I == 0 || dim_J == 0 || dim_K == 0 || args->sB == 0 || !std::isfinite(args->weight_scale))
-      return;
+    for (const auto &route : routes)
+      if (route.activation_quant == activation_quant && route.weight_quant == weight_quant)
+        return &route;
 
-    GGML_ASSERT(args->act == NO_ACTIVATION);
+    return nullptr;
+  }
 
-    if (args->tile_I == 0 || args->tile_J == 0 || args->tile_K == 0)
-      gemmini_set_tile(args);
+  static bool baseline_weight_tensor_scale(const ggml_gemmini_args_t &args,
+                                           float &scale) {
+    if (!args.weight_i8_scale_active || !std::isfinite(args.weight_scale))
+      return false;
 
-    const size_t tile_rows = args->tile_I * DIM;
-    if (tile_rows == 0)
-      return;
+    scale = args.weight_scale;
+    return true;
+  }
 
-    const elem_t *A = args->A;
-    const elem_t *B = args->B;
-    const size_t stride_A = args->sA ? args->sA : dim_K;
-    const size_t row_stride_B = args->sB;
-    const size_t out_row_stride = args->stride_f_out ? args->stride_f_out : dim_J;
-    const size_t out_col_stride = args->col_stride_f_out ? args->col_stride_f_out : 1;
-    if (std::get_if<ggml::gemmini::quants::act::exsia::Meta>(&args->act_quant.storage()) == nullptr)
-      return;
+  static bool baseline_weight_channel_scale(const ggml_gemmini_args_t &args,
+                                            size_t channel,
+                                            float &scale) {
+    if (args.weight_channel_scales == nullptr || args.J == 0 ||
+        args.weight_channel_scale_count != args.J || channel >= args.J)
+      return false;
 
-    const size_t num_i_tiles = (dim_I + tile_rows - 1) / tile_rows;
-    const size_t output_count = dim_I > SIZE_MAX / dim_J ? SIZE_MAX : dim_I * dim_J;
-#if defined(GGML_GEMMINI_HAS_OPENMP)
-    const bool use_exsia_openmp = output_count > 1;
-    const int exsia_threads = use_exsia_openmp ? resolve_exsia_threads(output_count) : 1;
-    if (use_exsia_openmp)
-      gemmini_log_debug_layer(layer,
-          "[tiled_matmul_auto_A-exsia_B-tensor] openmp outputs=%zu threads=%d mode=%s",
-          output_count, exsia_threads,
-          args->tiled_matmul_type == CPU ? "cpu" : "npu-dequant");
-#else
-    const bool use_exsia_openmp = false;
-#endif
-    gemmini_log_debug_layer(layer,
-        "[tiled_matmul_auto_A-exsia_B-tensor] dim=(I=%zu,J=%zu,K=%zu) tile_rows=%zu num_i_tiles=%zu "
-        "weight_scale=%.9f sB=%zu mode=%s",
-        dim_I, dim_J, dim_K, tile_rows, num_i_tiles,
-        static_cast<double>(args->weight_scale), row_stride_B,
-        args->tiled_matmul_type == CPU ? "cpu" : "npu");
+    const float candidate = args.weight_channel_scales[channel];
+    if (!std::isfinite(candidate))
+      return false;
 
-    std::vector<acc_t> acc32(dim_I * dim_J, 0);
+    scale = candidate;
+    return true;
+  }
 
-    if (args->tiled_matmul_type != CPU)
-    {
-      tiled_matmul(dim_I, dim_J, dim_K,
-          A, B, args->D, acc32.data(),
-          stride_A, row_stride_B, args->sD, dim_J,
-          1.0f, args->scale_B, args->scale_D,
-          args->act, args->scale, args->bert_scale, args->repeating_bias,
-          args->tile_I, args->tile_J, args->tile_K,
-          args->transpose_A, args->transpose_B,
-          true, args->low_D,
-          args->weightA,
-          args->tiled_matmul_type);
-    } else
-    {
-      auto compute_accumulator = [&](size_t i, size_t j) {
-        int32_t acc = 0;
-        for (size_t k = 0; k < dim_K; ++k)
-        {
-          const elem_t a = args->transpose_A ? A[k * stride_A + i] : A[i * stride_A + k];
-          acc += static_cast<int32_t>(a) * static_cast<int32_t>(B[j * row_stride_B + k]);
-        }
-        acc32[i * dim_J + j] = acc;
-      };
+  static bool baseline_weight_block_scale(const ggml_gemmini_args_t &args,
+                                          size_t channel,
+                                          size_t k_block,
+                                          float &scale) {
+    const size_t block_size = args.block_size_k ? args.block_size_k : GGML_GEMMINI_BLOCK_SIZE;
+    if (args.B_scales == nullptr || args.J == 0 || args.K == 0 ||
+        args.blocks_J != args.J || args.blocks_K == 0 || block_size == 0 ||
+        args.K > std::numeric_limits<size_t>::max() - (block_size - 1) ||
+        args.blocks_K != (args.K + block_size - 1) / block_size ||
+        channel >= args.blocks_J || k_block >= args.blocks_K ||
+        channel > (std::numeric_limits<size_t>::max() - k_block) / args.blocks_K)
+      return false;
 
-#if defined(GGML_GEMMINI_HAS_OPENMP)
-      if (use_exsia_openmp)
-      {
-#pragma omp parallel for collapse(2) schedule(static) num_threads(exsia_threads)
-        for (ptrdiff_t i = 0; i < static_cast<ptrdiff_t>(dim_I); ++i)
-          for (ptrdiff_t j = 0; j < static_cast<ptrdiff_t>(dim_J); ++j)
-            compute_accumulator(static_cast<size_t>(i), static_cast<size_t>(j));
-      }
-      else
-#endif
-      {
-        for (size_t i = 0; i < dim_I; ++i)
-          for (size_t j = 0; j < dim_J; ++j)
-            compute_accumulator(i, j);
-      }
+    const size_t offset = channel * args.blocks_K + k_block;
+    const float candidate = args.B_scales[offset];
+    if (!std::isfinite(candidate))
+      return false;
+
+    scale = candidate;
+    return true;
+  }
+
+  static bool baseline_weight_scale_provider(const ggml_gemmini_args_t &args,
+                                             baseline_weight_quant_t weight_quant,
+                                             size_t channel,
+                                             size_t k_block,
+                                             float &scale) {
+    switch (weight_quant) {
+      case baseline_weight_quant_t::TENSOR:
+        return baseline_weight_tensor_scale(args, scale);
+      case baseline_weight_quant_t::CHANNEL:
+        return baseline_weight_channel_scale(args, channel, scale);
+      case baseline_weight_quant_t::BLOCK:
+        return baseline_weight_block_scale(args, channel, k_block, scale);
+      case baseline_weight_quant_t::FLOAT:
+        return false;
     }
 
-    for (size_t i = 0; i < dim_I; ++i)
-      for (size_t j = 0; j < dim_J; ++j)
-        args->f_out[i * out_row_stride + j * out_col_stride] = 0.0f;
-
-    ggml::gemmini::dequantize(*args, 0, dim_K, acc32.data(), dim_J);
-
-    uint64_t end = ggml::gemmini::cycle::read();
-    gemmini_log_cycle(layer,
-        args->tiled_matmul_type == CPU ?
-            "[tiled_matmul_auto_A-exsia_B-tensor] cpu.dense_i8 tiled matmul" :
-            "[tiled_matmul_auto_A-exsia_B-tensor] npu.dense_i8 tiled matmul",
-        start, end);
-
+    return false;
   }
 
-  // per-tensor implementation. baseline system.
-  // activation: per-tensor, weight: per-tensor
-  // TODO: 조찬혁
-  static void tiled_matmul_auto_A_tensor_B_tensor(struct ggml_gemmini_args_t *args){
-    // tiled_matmul_auto를 참고하여, gemmini 호출 후 연산 결과를 per-tensor dequantize하도록 구현. 
-    if (args == NULL)
-      return;
+  static bool baseline_activation_scale_provider(
+      const ggml_gemmini_args_t &args,
+      baseline_activation_quant_t activation_quant,
+      std::vector<float> &scales) {
+    const auto &storage = args.act_quant.storage();
+    switch (activation_quant) {
+      case baseline_activation_quant_t::EXSIA:
+        if (std::get_if<ggml::gemmini::quants::act::exsia::Meta>(&storage) == nullptr)
+          return false;
+        break;
+      case baseline_activation_quant_t::TENSOR:
+        if (std::get_if<ggml::gemmini::quants::act::tensor::Meta>(&storage) == nullptr)
+          return false;
+        break;
+      case baseline_activation_quant_t::TOKEN:
+      {
+        const auto *meta = std::get_if<ggml::gemmini::quants::act::token::Meta>(&storage);
+        GGML_ASSERT(meta != nullptr && "TOKEN baseline route requires token::Meta");
+        GGML_ASSERT(meta->scales.size() == args.I &&
+                    std::all_of(meta->scales.begin(), meta->scales.end(),
+                                [](float scale) { return std::isfinite(scale) && scale > 0.0f; }) &&
+                    "TOKEN baseline route requires one finite positive activation scale per row");
+        break;
+      }
+      case baseline_activation_quant_t::BLOCK:
+      {
+        const auto *meta = std::get_if<ggml::gemmini::quants::act::block::Meta>(&storage);
+        GGML_ASSERT(meta != nullptr && "BLOCK baseline route requires block::Meta");
+        GGML_ASSERT(meta->scales.size() == args.I &&
+                    std::all_of(meta->scales.begin(), meta->scales.end(),
+                                [](float scale) { return std::isfinite(scale) && scale > 0.0f; }) &&
+                    "BLOCK baseline route requires one finite positive activation scale per row");
+        break;
+      }
+      case baseline_activation_quant_t::FLOAT:
+        return false;
+    }
 
-    const char *layer = ggml::gemmini::types::to_string(args->layer_type);
-    uint64_t start = ggml::gemmini::cycle::read();
+    scales = ggml::gemmini::quants::act::activation_scales(args, args.I);
+    return scales.size() == args.I;
+  }
+
+  static void tiled_matmul_auto_baseline_dense(
+      struct ggml_gemmini_args_t *args,
+      const baseline_route_t &route) {
+    if (args == nullptr || args->A == nullptr || args->f_out == nullptr)
+      return;
 
     const bool native_q8 = args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h1 ||
         args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h2 ||
         args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_hp1 ||
         args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_hp2;
-    if (native_q8)
-    {
+    if (route.activation_quant == baseline_activation_quant_t::TENSOR &&
+        route.weight_quant == baseline_weight_quant_t::TENSOR && native_q8) {
       tiled_matmul_im2p_impl(args, args->tiled_matmul_type == CPU,
           "[tiled_matmul_auto_A-tensor_B-native-q8] tiled matmul");
       return;
     }
 
-    if (args->A == nullptr || args->B == nullptr || args->f_out == nullptr)
+    if (args->B == nullptr)
       return;
-
-    if (args->tile_I == 0 || args->tile_J == 0 || args->tile_K == 0)
-      gemmini_set_tile(args);
 
     const size_t dim_I = args->I;
     const size_t dim_J = args->J;
     const size_t dim_K = args->K;
-    if (dim_I == 0 || dim_J == 0 || dim_K == 0 || args->sB == 0 ||
-        (args->weight_i8_scale_active && !std::isfinite(args->weight_scale)))
+    if (dim_I == 0 || dim_J == 0 || dim_K == 0 || args->sB == 0)
       return;
 
-    GGML_ASSERT(args->act == NO_ACTIVATION);
-
-    if (std::get_if<ggml::gemmini::quants::act::tensor::Meta>(&args->act_quant.storage()) == nullptr)
+    if (route.activation_quant == baseline_activation_quant_t::EXSIA &&
+        route.weight_quant == baseline_weight_quant_t::TENSOR &&
+        (!args->weight_i8_scale_active || !std::isfinite(args->weight_scale)))
       return;
 
-    const elem_t *A = args->A;
-    const elem_t *B = args->B;
-    const size_t stride_A = args->sA ? args->sA : dim_K;
-    const size_t row_stride_B = args->sB;
-    const size_t out_row_stride = args->stride_f_out ? args->stride_f_out : dim_J;
-    const size_t out_col_stride = args->col_stride_f_out ? args->col_stride_f_out : 1;
-    std::vector<acc_t> acc32(dim_I * dim_J, 0);
-
-    if (args->tiled_matmul_type != CPU)
-    {
-      tiled_matmul(dim_I, dim_J, dim_K,
-          A, B, args->D, acc32.data(),
-          stride_A, row_stride_B, args->sD, dim_J,
-          1.0f, args->scale_B, args->scale_D,
-          args->act, args->scale, args->bert_scale, args->repeating_bias,
-          args->tile_I, args->tile_J, args->tile_K,
-          args->transpose_A, args->transpose_B,
-          true, args->low_D,
-          args->weightA,
-          args->tiled_matmul_type);
-    } else
-    {
-      for (size_t i = 0; i < dim_I; ++i)
-        for (size_t j = 0; j < dim_J; ++j)
-        {
-          int32_t acc = 0;
-          for (size_t k = 0; k < dim_K; ++k)
-          {
-            const elem_t a = args->transpose_A ? A[k * stride_A + i] : A[i * stride_A + k];
-            acc += static_cast<int32_t>(a) * static_cast<int32_t>(B[j * row_stride_B + k]);
-          }
-          acc32[i * dim_J + j] = acc;
-        }
+    if (route.activation_quant == baseline_activation_quant_t::TOKEN) {
+      GGML_ASSERT(args->transpose_B &&
+                  args->sB == args->K &&
+                  "TOKEN baseline route requires dense row-major I8 weights");
+      if (route.weight_quant == baseline_weight_quant_t::TENSOR) {
+        GGML_ASSERT(args->weight_i8_scale_active &&
+                    std::isfinite(args->weight_scale) &&
+                    args->weight_scale > 0.0f &&
+                    "TOKEN/TENSOR requires a finite positive scalar weight scale");
+      }
     }
 
-    for (size_t i = 0; i < dim_I; ++i)
-      for (size_t j = 0; j < dim_J; ++j)
-        args->f_out[i * out_row_stride + j * out_col_stride] = 0.0f;
-
-    ggml::gemmini::dequantize(*args, 0, dim_K, acc32.data(), dim_J);
-
-    uint64_t end = ggml::gemmini::cycle::read();
-    gemmini_log_cycle(layer, "[tiled_matmul_auto_A-tensor_B-tensor] dense_i8 tiled matmul", start, end);
-  }
-
-  static void tiled_matmul_auto_A_token_B_tensor(struct ggml_gemmini_args_t *args) {
-    GGML_ASSERT(args != nullptr);
-    GGML_ASSERT(args->B != nullptr &&
-                args->weight_i8_scale_active &&
-                args->transpose_B &&
-                args->sB == args->K &&
-                std::isfinite(args->weight_scale) &&
-                args->weight_scale > 0.0f &&
-                "TOKEN/TENSOR requires dense row-major I8 weights with a finite positive scalar scale");
-
-    const auto *token_meta =
-        std::get_if<ggml::gemmini::quants::act::token::Meta>(&args->act_quant.storage());
-    GGML_ASSERT(token_meta != nullptr && "TOKEN/TENSOR requires token::Meta");
-    GGML_ASSERT(token_meta->scales.size() == args->I &&
-                std::all_of(token_meta->scales.begin(), token_meta->scales.end(),
-                            [](float scale) { return std::isfinite(scale) && scale > 0.0f; }) &&
-                "TOKEN/TENSOR requires one finite positive activation scale per row");
-
-    if (args->A == nullptr || args->f_out == nullptr)
-      return;
-
-    const size_t dim_I = args->I;
-    const size_t dim_J = args->J;
-    const size_t dim_K = args->K;
-    if (dim_I == 0 || dim_J == 0 || dim_K == 0)
+    if (route.weight_quant == baseline_weight_quant_t::TENSOR &&
+        args->weight_i8_scale_active && !std::isfinite(args->weight_scale))
       return;
 
     GGML_ASSERT(args->act == NO_ACTIVATION);
+
+    std::vector<float> activation_scales;
+    if (!baseline_activation_scale_provider(*args, route.activation_quant, activation_scales))
+      return;
+
+    const size_t block_size = args->block_size_k ? args->block_size_k : GGML_GEMMINI_BLOCK_SIZE;
+    if (block_size == 0 || dim_K > std::numeric_limits<size_t>::max() - (block_size - 1))
+      return;
+    const size_t weight_block_count = route.weight_quant == baseline_weight_quant_t::BLOCK ?
+        (dim_K + block_size - 1) / block_size : 1;
+    for (size_t j = 0; j < dim_J; ++j)
+      for (size_t k_block = 0; k_block < weight_block_count; ++k_block) {
+        float ignored_scale = 0.0f;
+        if (route.weight_quant != baseline_weight_quant_t::TENSOR || args->weight_i8_scale_active) {
+          if (!baseline_weight_scale_provider(*args, route.weight_quant, j, k_block, ignored_scale))
+            return;
+        }
+      }
 
     if (args->tile_I == 0 || args->tile_J == 0 || args->tile_K == 0)
       gemmini_set_tile(args);
@@ -2769,10 +2748,18 @@ namespace ggml { namespace gemmini {
     const size_t row_stride_B = args->sB;
     const size_t out_row_stride = args->stride_f_out ? args->stride_f_out : dim_J;
     const size_t out_col_stride = args->col_stride_f_out ? args->col_stride_f_out : 1;
+    const bool block_weight_route = route.weight_quant == baseline_weight_quant_t::BLOCK;
     std::vector<acc_t> acc32(dim_I * dim_J, 0);
+    std::vector<double> block_acc;
+    if (block_weight_route)
+      block_acc.assign(dim_I * dim_J, 0.0);
 
-    if (args->tiled_matmul_type != CPU)
-    {
+    for (size_t i = 0; i < dim_I; ++i)
+      for (size_t j = 0; j < dim_J; ++j)
+        args->f_out[i * out_row_stride + j * out_col_stride] = 0.0f;
+
+    const bool use_tiled_matmul = args->tiled_matmul_type != CPU && !block_weight_route;
+    if (use_tiled_matmul) {
       tiled_matmul(dim_I, dim_J, dim_K,
           A, B, args->D, acc32.data(),
           stride_A, row_stride_B, args->sD, dim_J,
@@ -2783,42 +2770,66 @@ namespace ggml { namespace gemmini {
           true, args->low_D,
           args->weightA,
           args->tiled_matmul_type);
-    } else
-    {
+    } else {
       for (size_t i = 0; i < dim_I; ++i)
-        for (size_t j = 0; j < dim_J; ++j)
-        {
+        for (size_t j = 0; j < dim_J; ++j) {
           int32_t acc = 0;
-          for (size_t k = 0; k < dim_K; ++k)
-          {
+          for (size_t k = 0; k < dim_K; ++k) {
             const elem_t a = args->transpose_A ? A[k * stride_A + i] : A[i * stride_A + k];
-            acc += static_cast<int32_t>(a) * static_cast<int32_t>(B[j * row_stride_B + k]);
+            const int32_t product = static_cast<int32_t>(a) *
+                static_cast<int32_t>(B[j * row_stride_B + k]);
+            if (block_weight_route) {
+              float weight_scale = 0.0f;
+              if (!baseline_weight_scale_provider(*args, route.weight_quant, j, k / block_size, weight_scale))
+                return;
+              block_acc[i * dim_J + j] += static_cast<double>(product) * weight_scale;
+            } else {
+              acc += product;
+            }
           }
-          acc32[i * dim_J + j] = acc;
+          if (!block_weight_route)
+            acc32[i * dim_J + j] = acc;
         }
     }
 
-    for (size_t i = 0; i < dim_I; ++i)
-      for (size_t j = 0; j < dim_J; ++j)
-        args->f_out[i * out_row_stride + j * out_col_stride] = 0.0f;
-
-    ggml::gemmini::dequantize(*args, 0, dim_K, acc32.data(), dim_J);
+    if (route.weight_quant == baseline_weight_quant_t::TENSOR && !args->weight_i8_scale_active) {
+      ggml::gemmini::dequantize(*args, 0, dim_K, acc32.data(), dim_J);
+    } else {
+      for (size_t i = 0; i < dim_I; ++i)
+        for (size_t j = 0; j < dim_J; ++j) {
+          const size_t output_offset = i * out_row_stride + j * out_col_stride;
+          if (block_weight_route) {
+            args->f_out[output_offset] += static_cast<float>(block_acc[i * dim_J + j] * activation_scales[i]);
+          } else {
+            float weight_scale = 0.0f;
+            if (!baseline_weight_scale_provider(*args, route.weight_quant, j, 0, weight_scale))
+              return;
+            args->f_out[output_offset] += static_cast<float>(
+                static_cast<double>(acc32[i * dim_J + j]) * weight_scale * activation_scales[i]);
+          }
+        }
+    }
 
     const uint64_t end = ggml::gemmini::cycle::read();
-    gemmini_log_cycle(layer, "[tiled_matmul_auto_A-token_B-tensor] dense_i8 tiled matmul", start, end);
+    gemmini_log_cycle(layer,
+        args->tiled_matmul_type == CPU ? route.cpu_cycle_label : route.npu_cycle_label,
+        start, end);
   }
 
-  enum class baseline_activation_quant_t : uint8_t {
-    FLOAT = 0,
-    EXSIA,
-    TENSOR,
-    TOKEN,
-  };
+  static void tiled_matmul_auto_A_exsia_B_tensor(struct ggml_gemmini_args_t *args) {
+    tiled_matmul_auto_baseline_dense(args, *baseline_route_for(
+        baseline_activation_quant_t::EXSIA, baseline_weight_quant_t::TENSOR));
+  }
 
-  enum class baseline_weight_quant_t : uint8_t {
-    FLOAT = 0,
-    TENSOR,
-  };
+  static void tiled_matmul_auto_A_tensor_B_tensor(struct ggml_gemmini_args_t *args) {
+    tiled_matmul_auto_baseline_dense(args, *baseline_route_for(
+        baseline_activation_quant_t::TENSOR, baseline_weight_quant_t::TENSOR));
+  }
+
+  static void tiled_matmul_auto_A_token_B_tensor(struct ggml_gemmini_args_t *args) {
+    tiled_matmul_auto_baseline_dense(args, *baseline_route_for(
+        baseline_activation_quant_t::TOKEN, baseline_weight_quant_t::TENSOR));
+  }
 
   static void tiled_matmul_auto_baseline(struct ggml_gemmini_args_t *args,
                                          baseline_activation_quant_t activation_quant,
@@ -2829,25 +2840,9 @@ namespace ggml { namespace gemmini {
       return;
     }
 
-    if (activation_quant == baseline_activation_quant_t::EXSIA &&
-        weight_quant == baseline_weight_quant_t::TENSOR) {
-      tiled_matmul_auto_A_exsia_B_tensor(args);
-      return;
-    }
-
-    if (activation_quant == baseline_activation_quant_t::TENSOR &&
-        weight_quant == baseline_weight_quant_t::TENSOR) {
-      tiled_matmul_auto_A_tensor_B_tensor(args);
-      return;
-    }
-
-    if (activation_quant == baseline_activation_quant_t::TOKEN &&
-        weight_quant == baseline_weight_quant_t::TENSOR) {
-      tiled_matmul_auto_A_token_B_tensor(args);
-      return;
-    }
-
-    GGML_ASSERT(false && "unsupported Gemmini baseline quantization pair");
+    const baseline_route_t *route = baseline_route_for(activation_quant, weight_quant);
+    GGML_ASSERT(route != nullptr && "unsupported Gemmini baseline quantization pair");
+    tiled_matmul_auto_baseline_dense(args, *route);
   }
 
 }} // namespace ggml::gemmini
