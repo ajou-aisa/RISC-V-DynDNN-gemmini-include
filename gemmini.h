@@ -2497,6 +2497,14 @@ namespace ggml { namespace gemmini {
         ws_cycle_label = "[tiled_matmul_im2p_ws] ws-sim.Q8_HP2 tiled matmul";
         os_message = "[tiled_matmul_auto_im2p] Q8_HP2 OS mode is unsupported";
         break;
+      case ggml_gemmini_args_t::im2p_weight_format_t::q8_channel:
+        if (!args->has_q8_channel_direct_read_contract())
+          gemmini_log_debug_layer(layer,
+              "[tiled_matmul_auto_im2p] reject malformed Q8_CHANNEL direct-read contract");
+        else
+          gemmini_log_debug_layer(layer,
+              "[tiled_matmul_auto_im2p] Q8_CHANNEL direct-read requires baseline/DEC software route; IM2P hardware subroute would require repack");
+        return;
       case ggml_gemmini_args_t::im2p_weight_format_t::q8_h0:
         gemmini_log_debug_layer(
             layer,
@@ -2560,14 +2568,14 @@ namespace ggml { namespace gemmini {
        "[tiled_matmul_auto_A-token_B-tensor] cpu.dense_i8 tiled matmul",
        "[tiled_matmul_auto_A-token_B-tensor] npu.dense_i8 tiled matmul"},
       {baseline_activation_quant_t::TENSOR, baseline_weight_quant_t::CHANNEL,
-       "[tiled_matmul_auto_baseline] cpu.tensor_channel dense_i8 tiled matmul",
-       "[tiled_matmul_auto_baseline] npu.tensor_channel dense_i8 tiled matmul"},
+       "[tiled_matmul_auto_baseline] cpu.tensor_channel Q8_CHANNEL direct-read tiled matmul",
+       "[tiled_matmul_auto_baseline] npu.tensor_channel Q8_CHANNEL direct-read tiled matmul"},
       {baseline_activation_quant_t::TENSOR, baseline_weight_quant_t::BLOCK,
        "[tiled_matmul_auto_baseline] cpu.tensor_block dense_i8 tiled matmul",
        "[tiled_matmul_auto_baseline] npu.tensor_block dense_i8 tiled matmul"},
       {baseline_activation_quant_t::TOKEN, baseline_weight_quant_t::CHANNEL,
-       "[tiled_matmul_auto_baseline] cpu.token_channel dense_i8 tiled matmul",
-       "[tiled_matmul_auto_baseline] npu.token_channel dense_i8 tiled matmul"},
+       "[tiled_matmul_auto_baseline] cpu.token_channel Q8_CHANNEL direct-read tiled matmul",
+       "[tiled_matmul_auto_baseline] npu.token_channel Q8_CHANNEL direct-read tiled matmul"},
       {baseline_activation_quant_t::TOKEN, baseline_weight_quant_t::BLOCK,
        "[tiled_matmul_auto_baseline] cpu.token_block dense_i8 tiled matmul",
        "[tiled_matmul_auto_baseline] npu.token_block dense_i8 tiled matmul"},
@@ -2589,52 +2597,6 @@ namespace ggml { namespace gemmini {
     return nullptr;
   }
 
-  static bool baseline_weight_tensor_scale(const ggml_gemmini_args_t &args,
-                                           float &scale) {
-    if (!args.weight_i8_scale_active || !std::isfinite(args.weight_scale))
-      return false;
-
-    scale = args.weight_scale;
-    return true;
-  }
-
-  static bool baseline_weight_channel_scale(const ggml_gemmini_args_t &args,
-                                            size_t channel,
-                                            float &scale) {
-    if (args.weight_channel_scales == nullptr || args.J == 0 ||
-        args.weight_channel_scale_count != args.J || channel >= args.J)
-      return false;
-
-    const float candidate = args.weight_channel_scales[channel];
-    if (!std::isfinite(candidate))
-      return false;
-
-    scale = candidate;
-    return true;
-  }
-
-  static bool baseline_weight_block_scale(const ggml_gemmini_args_t &args,
-                                          size_t channel,
-                                          size_t k_block,
-                                          float &scale) {
-    const size_t block_size = args.block_size_k ? args.block_size_k : GGML_GEMMINI_BLOCK_SIZE;
-    if (args.B_scales == nullptr || args.J == 0 || args.K == 0 ||
-        args.blocks_J != args.J || args.blocks_K == 0 || block_size == 0 ||
-        args.K > std::numeric_limits<size_t>::max() - (block_size - 1) ||
-        args.blocks_K != (args.K + block_size - 1) / block_size ||
-        channel >= args.blocks_J || k_block >= args.blocks_K ||
-        channel > (std::numeric_limits<size_t>::max() - k_block) / args.blocks_K)
-      return false;
-
-    const size_t offset = channel * args.blocks_K + k_block;
-    const float candidate = args.B_scales[offset];
-    if (!std::isfinite(candidate))
-      return false;
-
-    scale = candidate;
-    return true;
-  }
-
   static bool baseline_weight_scale_provider(const ggml_gemmini_args_t &args,
                                              baseline_weight_quant_t weight_quant,
                                              size_t channel,
@@ -2642,11 +2604,54 @@ namespace ggml { namespace gemmini {
                                              float &scale) {
     switch (weight_quant) {
       case baseline_weight_quant_t::TENSOR:
-        return baseline_weight_tensor_scale(args, scale);
+        if (!args.weight_i8_scale_active || !std::isfinite(args.weight_scale))
+          return false;
+        scale = args.weight_scale;
+        return true;
       case baseline_weight_quant_t::CHANNEL:
-        return baseline_weight_channel_scale(args, channel, scale);
+      {
+        const bool q8_channel_direct_read = args.has_q8_channel_direct_read_contract();
+        const bool q8_channel_dense_sidecar = args.has_q8_channel_dense_sidecar_contract();
+        if (q8_channel_direct_read) {
+          if (channel >= args.J)
+            return false;
+          const float candidate = args.q8_channel_scale(channel);
+          if (!std::isfinite(candidate))
+            return false;
+
+          scale = candidate;
+          return true;
+        }
+
+        if (!q8_channel_dense_sidecar || channel >= args.J)
+            return false;
+
+        const float candidate = args.weight_channel_scales[channel];
+        if (!std::isfinite(candidate))
+          return false;
+
+        scale = candidate;
+        return true;
+      }
       case baseline_weight_quant_t::BLOCK:
-        return baseline_weight_block_scale(args, channel, k_block, scale);
+      {
+        const size_t block_size = args.block_size_k ? args.block_size_k : GGML_GEMMINI_BLOCK_SIZE;
+        if (args.B_scales == nullptr || args.J == 0 || args.K == 0 ||
+            args.blocks_J != args.J || args.blocks_K == 0 || block_size == 0 ||
+            args.K > std::numeric_limits<size_t>::max() - (block_size - 1) ||
+            args.blocks_K != (args.K + block_size - 1) / block_size ||
+            channel >= args.blocks_J || k_block >= args.blocks_K ||
+            channel > (std::numeric_limits<size_t>::max() - k_block) / args.blocks_K)
+          return false;
+
+        const size_t offset = channel * args.blocks_K + k_block;
+        const float candidate = args.B_scales[offset];
+        if (!std::isfinite(candidate))
+          return false;
+
+        scale = candidate;
+        return true;
+      }
       case baseline_weight_quant_t::FLOAT:
         return false;
     }
@@ -2680,12 +2685,16 @@ namespace ggml { namespace gemmini {
       }
       case baseline_activation_quant_t::BLOCK:
       {
-        const auto *meta = std::get_if<ggml::gemmini::quants::act::block::Meta>(&storage);
-        GGML_ASSERT(meta != nullptr && "BLOCK baseline route requires block::Meta");
-        GGML_ASSERT(meta->scales.size() == args.I &&
-                    std::all_of(meta->scales.begin(), meta->scales.end(),
-                                [](float scale) { return std::isfinite(scale) && scale > 0.0f; }) &&
-                    "BLOCK baseline route requires one finite positive activation scale per row");
+        const auto *block_meta = std::get_if<ggml::gemmini::quants::act::block::Meta>(&storage);
+        GGML_ASSERT((block_meta != nullptr ||
+                     std::get_if<ggml::gemmini::quants::act::stripe::Meta>(&storage) != nullptr) &&
+                    "BLOCK baseline route requires block::Meta or stripe::Meta");
+        if (block_meta != nullptr) {
+          GGML_ASSERT(block_meta->scales.size() == args.I &&
+                      std::all_of(block_meta->scales.begin(), block_meta->scales.end(),
+                                  [](float scale) { return std::isfinite(scale) && scale > 0.0f; }) &&
+                      "BLOCK baseline route requires one finite positive activation scale per row");
+        }
         break;
       }
       case baseline_activation_quant_t::FLOAT:
@@ -2727,10 +2736,23 @@ namespace ggml { namespace gemmini {
         (!args->weight_i8_scale_active || !std::isfinite(args->weight_scale)))
       return;
 
+    const bool q8_channel_route = route.weight_quant == baseline_weight_quant_t::CHANNEL;
+    const bool q8_channel_direct_read = q8_channel_route &&
+        args->has_q8_channel_direct_read_contract();
+    const bool q8_channel_dense_sidecar = q8_channel_route &&
+        args->has_q8_channel_dense_sidecar_contract();
+    if (q8_channel_route && !q8_channel_direct_read && !q8_channel_dense_sidecar)
+      return;
+
     if (route.activation_quant == baseline_activation_quant_t::TOKEN) {
-      GGML_ASSERT(args->transpose_B &&
-                  args->sB == args->K &&
-                  "TOKEN baseline route requires dense row-major I8 weights");
+      if (q8_channel_route) {
+        GGML_ASSERT(args->transpose_B &&
+                    (q8_channel_direct_read || q8_channel_dense_sidecar) &&
+                    "TOKEN Q8_CHANNEL route requires transpose_B and a valid channel contract");
+      } else {
+        GGML_ASSERT(args->transpose_B && args->sB == args->K &&
+                    "TOKEN baseline route requires dense row-major I8 weights");
+      }
       if (route.weight_quant == baseline_weight_quant_t::TENSOR) {
         GGML_ASSERT(args->weight_i8_scale_active &&
                     std::isfinite(args->weight_scale) &&
