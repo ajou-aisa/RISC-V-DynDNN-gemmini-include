@@ -91,6 +91,9 @@
 #ifndef GEMMINI_WS_DEBUG
 #define GEMMINI_WS_DEBUG 0
 #endif
+#ifndef GEMMINI_WS_LOOP_DEBUG
+#define GEMMINI_WS_LOOP_DEBUG 0
+#endif
 #ifndef GEMMINI_DISABLE_WS_REUSE
 #define GEMMINI_DISABLE_WS_REUSE 0
 #endif
@@ -869,6 +872,19 @@ static void tiled_matmul_outer(size_t dim_I, size_t dim_J, size_t dim_K,
 
   size_t ws_call_idx = 0;
 
+#if GEMMINI_WS_LOOP_DEBUG && defined(__riscv)
+  const bool ws_loop_debug = dataflow == WEIGHT_STATIONARY;
+  uint64_t ws_loop_start = 0;
+  if (ws_loop_debug) {
+    counter_configure(0, LOAD_ACTIVE_CYCLE);
+    counter_configure(1, EXE_ACTIVE_CYCLE);
+    counter_configure(2, STORE_ACTIVE_CYCLE);
+    counter_configure(3, LOOP_MATMUL_ACTIVE_CYCLES);
+    counter_snapshot_reset();
+    ws_loop_start = ggml::gemmini::cycle::read();
+  }
+#endif
+
   for (size_t i0 = 0; i0 < I0; i0++)
     for (size_t j0 = 0; j0 < J0; j0++)
       for (size_t k0 = 0; k0 < K0; k0++) {
@@ -938,6 +954,20 @@ static void tiled_matmul_outer(size_t dim_I, size_t dim_J, size_t dim_K,
       }
 
   gemmini_fence();
+
+#if GEMMINI_WS_LOOP_DEBUG && defined(__riscv)
+  if (ws_loop_debug) {
+    const uint64_t ws_loop_end = ggml::gemmini::cycle::read();
+    counter_snapshot_take();
+    gemmini_log_ws_loop(
+        ws_loop_end - ws_loop_start,
+        counter_read(0), counter_read(1), counter_read(2), counter_read(3),
+        dim_I, dim_J, dim_K,
+        tile_I, tile_J, tile_K,
+        I0, J0, K0,
+        a_reuse ? 1 : 0, b_reuse ? 1 : 0);
+  }
+#endif
 }
 
 
