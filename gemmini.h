@@ -91,6 +91,9 @@
 #ifndef GEMMINI_WS_DEBUG
 #define GEMMINI_WS_DEBUG 0
 #endif
+#ifndef GEMMINI_WS_LOOP_DEBUG
+#define GEMMINI_WS_LOOP_DEBUG 0
+#endif
 #ifndef GEMMINI_DISABLE_WS_REUSE
 #define GEMMINI_DISABLE_WS_REUSE 0
 #endif
@@ -869,6 +872,19 @@ static void tiled_matmul_outer(size_t dim_I, size_t dim_J, size_t dim_K,
 
   size_t ws_call_idx = 0;
 
+#if GEMMINI_WS_LOOP_DEBUG && defined(__riscv)
+  const bool ws_loop_debug = dataflow == WEIGHT_STATIONARY;
+  uint64_t ws_loop_start = 0;
+  if (ws_loop_debug) {
+    counter_configure(0, LOAD_ACTIVE_CYCLE);
+    counter_configure(1, EXE_ACTIVE_CYCLE);
+    counter_configure(2, STORE_ACTIVE_CYCLE);
+    counter_configure(3, LOOP_MATMUL_ACTIVE_CYCLES);
+    counter_snapshot_reset();
+    ws_loop_start = ggml::gemmini::cycle::read();
+  }
+#endif
+
   for (size_t i0 = 0; i0 < I0; i0++)
     for (size_t j0 = 0; j0 < J0; j0++)
       for (size_t k0 = 0; k0 < K0; k0++) {
@@ -938,6 +954,20 @@ static void tiled_matmul_outer(size_t dim_I, size_t dim_J, size_t dim_K,
       }
 
   gemmini_fence();
+
+#if GEMMINI_WS_LOOP_DEBUG && defined(__riscv)
+  if (ws_loop_debug) {
+    const uint64_t ws_loop_end = ggml::gemmini::cycle::read();
+    counter_snapshot_take();
+    gemmini_log_ws_loop(
+        ws_loop_end - ws_loop_start,
+        counter_read(0), counter_read(1), counter_read(2), counter_read(3),
+        dim_I, dim_J, dim_K,
+        tile_I, tile_J, tile_K,
+        I0, J0, K0,
+        a_reuse ? 1 : 0, b_reuse ? 1 : 0);
+  }
+#endif
 }
 
 
@@ -1812,7 +1842,7 @@ namespace ggml { namespace gemmini {
     }
   }
 
-  static void gemmini_set_tile(struct ggml_gemmini_args_t *args){
+  static void gemmini_set_tile_ws(struct ggml_gemmini_args_t *args){
     const char *layer = ggml::gemmini::types::to_string(args->layer_type);
 
     // tile size 계산
@@ -1823,15 +1853,7 @@ namespace ggml { namespace gemmini {
     const size_t dim_I = args->I;
     const size_t dim_J = args->J;
     const size_t dim_K = args->K;
-    const enum tiled_matmul_type_t tiled_matmul_type = args->tiled_matmul_type;
     const int act = args->act;
-
-        // gemmini 기본 auto tiling
-#define partition_rows (BANK_NUM * BANK_ROWS / 2)
-#define mats_in_partition (partition_rows / DIM)
-#define mats_in_acc (ACC_ROWS / DIM)
-#define max_tile_i_j ((size_t)sqrt(mats_in_acc))
-#define max_tile_k (mats_in_partition / max_tile_i_j)
 
     // "db_" means "double-buffered"
 #define db_partition_rows ((BANK_NUM * BANK_ROWS / 2) / 2)
@@ -1845,12 +1867,8 @@ namespace ggml { namespace gemmini {
     const size_t dim_J_padded = (dim_J / DIM + (dim_J % DIM != 0)) * DIM;
     const size_t dim_K_padded = (dim_K / DIM + (dim_K % DIM != 0)) * DIM;
 
-    // WS 모드에서는 스크래치패드와 ACC를 두 세트로 나눠 번갈아 쓰기 때문에 최대 사용량이 절반으로 감소
-    const bool double_buffered = tiled_matmul_type == WS;
-
-    // auto tiler가 탐색할 최대 scratchpad/ACC 행 수를 미리 계산
-    const size_t max_spad_rows = double_buffered ? BANK_NUM * BANK_ROWS / 2 : BANK_NUM * BANK_ROWS;
-    const size_t max_acc_rows = double_buffered ? ACC_ROWS / 2 : ACC_ROWS;
+    const size_t max_spad_rows = BANK_NUM * BANK_ROWS / 2;
+    const size_t max_acc_rows = ACC_ROWS / 2;
 
     // tile_I/tile_J/tile_K는 DIM 단위 매트릭스 개수(행렬 블록 수)
     size_t tile_I, tile_J, tile_K;
@@ -1862,19 +1880,11 @@ namespace ggml { namespace gemmini {
       tile_J = dim_J_padded / DIM;
       tile_K = 1;
     }
-    else if (double_buffered)
+    else
     {
-      // WS 모드: scratchpad/ACC 용량이 절반이므로 db_* 상수로 계산한 최대치와 실제 필요량 중 작은 값을 선택
       tile_I = dim_I_padded / DIM < db_max_tile_i_j ? dim_I_padded / DIM : db_max_tile_i_j;
       tile_J = dim_J_padded / DIM < db_max_tile_i_j ? dim_J_padded / DIM : db_max_tile_i_j;
       tile_K = dim_K_padded / DIM < db_max_tile_k ? dim_K_padded / DIM : db_max_tile_k;
-    }
-    else
-    {
-      // OS 모드: 전체 scratchpad/ACC를 쓸 수 있으니 기본 max_* 한도와 비교
-      tile_I = dim_I_padded / DIM < max_tile_i_j ? dim_I_padded / DIM : max_tile_i_j;
-      tile_J = dim_J_padded / DIM < max_tile_i_j ? dim_J_padded / DIM : max_tile_i_j;
-      tile_K = dim_K_padded / DIM < max_tile_k ? dim_K_padded / DIM : max_tile_k;
     }
 
     // Fill scratchpad as much as possible
@@ -1917,7 +1927,7 @@ namespace ggml { namespace gemmini {
     args->tile_K = tile_K;
 
     // tile size 디버깅
-    gemmini_log_debug_layer(layer, "[set_tile] dim=(%zu,%zu,%zu) tiles=(%zu,%zu,%zu)",
+    gemmini_log_debug_layer(layer, "[set_tile_ws] dim=(%zu,%zu,%zu) tiles=(%zu,%zu,%zu)",
                    dim_I, dim_J, dim_K, tile_I, tile_J, tile_K);
   }
 
@@ -1995,7 +2005,7 @@ namespace ggml { namespace gemmini {
     }
 
     if (args->tile_I == 0 || args->tile_J == 0 || args->tile_K == 0)
-      gemmini_set_tile(args);
+      gemmini_set_tile_ws(args);
 
     const size_t dim_I = args->I;
     const size_t dim_J = args->J;
@@ -2081,27 +2091,6 @@ namespace ggml { namespace gemmini {
         return;
       }
     }
-
-#if !ERROR_COMPENSATION
-    std::vector<int32_t> activation_residuals;
-    if (activation_meta != nullptr && !activation_meta->outliers.empty())
-    {
-      if (dim_I > std::numeric_limits<size_t>::max() / dim_K)
-        return;
-
-      activation_residuals.assign(dim_I * dim_K, 0);
-      for (const auto &outlier : activation_meta->outliers)
-      {
-        if (outlier.row < 0 || outlier.col < 0)
-          continue;
-
-        const size_t row = static_cast<size_t>(outlier.row);
-        const size_t col = static_cast<size_t>(outlier.col);
-        if (row < dim_I && col < dim_K)
-          activation_residuals[row * dim_K + col] += outlier.residual;
-      }
-    }
-#endif
 
     if (activation_meta != nullptr)
     {
@@ -2207,10 +2196,6 @@ namespace ggml { namespace gemmini {
             int32_t a = static_cast<int32_t>(args->transpose_A
                                                  ? A[src_k * stride_A + src_i]
                                                  : A[src_i * stride_A + src_k]);
-#if !ERROR_COMPENSATION
-            if (!activation_residuals.empty())
-              a += activation_residuals[src_i * dim_K + src_k];
-#endif
             if (native_q8)
               a_tile_i32[i * tile_k_padded + kk] = a;
             else
@@ -2786,7 +2771,7 @@ namespace ggml { namespace gemmini {
       }
 
     if (args->tile_I == 0 || args->tile_J == 0 || args->tile_K == 0)
-      gemmini_set_tile(args);
+      gemmini_set_tile_ws(args);
 
     const char *layer = ggml::gemmini::types::to_string(args->layer_type);
     const uint64_t start = ggml::gemmini::cycle::read();
