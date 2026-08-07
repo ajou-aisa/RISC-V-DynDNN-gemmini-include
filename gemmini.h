@@ -2092,27 +2092,6 @@ namespace ggml { namespace gemmini {
       }
     }
 
-#if !ERROR_COMPENSATION
-    std::vector<int32_t> activation_residuals;
-    if (activation_meta != nullptr && !activation_meta->outliers.empty())
-    {
-      if (dim_I > std::numeric_limits<size_t>::max() / dim_K)
-        return;
-
-      activation_residuals.assign(dim_I * dim_K, 0);
-      for (const auto &outlier : activation_meta->outliers)
-      {
-        if (outlier.row < 0 || outlier.col < 0)
-          continue;
-
-        const size_t row = static_cast<size_t>(outlier.row);
-        const size_t col = static_cast<size_t>(outlier.col);
-        if (row < dim_I && col < dim_K)
-          activation_residuals[row * dim_K + col] += outlier.residual;
-      }
-    }
-#endif
-
     if (activation_meta != nullptr)
     {
       const int16_t invalid_theta = std::numeric_limits<int16_t>::min();
@@ -2217,10 +2196,6 @@ namespace ggml { namespace gemmini {
             int32_t a = static_cast<int32_t>(args->transpose_A
                                                  ? A[src_k * stride_A + src_i]
                                                  : A[src_i * stride_A + src_k]);
-#if !ERROR_COMPENSATION
-            if (!activation_residuals.empty())
-              a += activation_residuals[src_i * dim_K + src_k];
-#endif
             if (native_q8)
               a_tile_i32[i * tile_k_padded + kk] = a;
             else
