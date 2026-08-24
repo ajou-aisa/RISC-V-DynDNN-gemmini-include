@@ -1768,12 +1768,17 @@ namespace ggml { namespace gemmini {
   // TODO: 김동현
   static void tiled_matmul_auto_fp(struct ggml_gemmini_args_t *args)
   {
-    const char *layer = ggml::gemmini::types::to_string(args->layer_type);
+    if (args == NULL)
+      return;
+
+    const char *layer = args->matmul_layer.c_str();
+#if defined(GGML_GEMMINI_TEST_OBSERVER)
+    if (test_observe_semantic_layer(TestSemanticLayerSite::physical_auto_fp, layer))
+      return;
+#endif
 
     // tile size와 block size 매칭을 통해, tiled별 연산 결과를 dequantize해서 llama.cpp의 output으로 전달
     uint64_t start = ggml::gemmini::cycle::read();
-    if (args == NULL)
-      return;
 
     const size_t dim_I = args->I;
     const size_t dim_J = args->J;
@@ -1851,12 +1856,17 @@ namespace ggml { namespace gemmini {
   }
 
   static void gemmini_set_tile_ws(struct ggml_gemmini_args_t *args){
-    const char *layer = ggml::gemmini::types::to_string(args->layer_type);
+    if (args == NULL)
+      return;
+
+    const char *layer = args->matmul_layer.c_str();
+#if defined(GGML_GEMMINI_TEST_OBSERVER)
+    if (test_observe_semantic_layer(TestSemanticLayerSite::physical_set_tile_ws, layer))
+      return;
+#endif
 
     // tile size 계산
     uint64_t start = ggml::gemmini::cycle::read();
-    if (args == NULL)
-      return;
 
     const size_t dim_I = args->I;
     const size_t dim_J = args->J;
@@ -1983,7 +1993,11 @@ namespace ggml { namespace gemmini {
     if (args == NULL)
       return;
 
-    const char *layer = ggml::gemmini::types::to_string(args->layer_type);
+    const char *layer = args->matmul_layer.c_str();
+#if defined(GGML_GEMMINI_TEST_OBSERVER)
+    if (test_observe_semantic_layer(TestSemanticLayerSite::physical_im2p_impl, layer))
+      return;
+#endif
     const bool native_q8 = args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h1 ||
         args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h2 ||
         args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_hp1 ||
@@ -2463,7 +2477,11 @@ namespace ggml { namespace gemmini {
     if (args == NULL)
       return;
 
-    const char *layer = ggml::gemmini::types::to_string(args->layer_type);
+    const char *layer = args->matmul_layer.c_str();
+#if defined(GGML_GEMMINI_TEST_OBSERVER)
+    if (test_observe_semantic_layer(TestSemanticLayerSite::physical_auto_im2p, layer))
+      return;
+#endif
     const char *cpu_cycle_label = nullptr;
     const char *ws_cycle_label = nullptr;
     const char *os_message = nullptr;
@@ -2704,6 +2722,11 @@ namespace ggml { namespace gemmini {
     if (args == nullptr || args->A == nullptr || args->f_out == nullptr)
       return;
 
+    const char *layer = args->matmul_layer.c_str();
+#if defined(GGML_GEMMINI_TEST_OBSERVER)
+    if (test_observe_semantic_layer(TestSemanticLayerSite::physical_baseline_dense, layer))
+      return;
+#endif
     const bool native_q8 = args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h1 ||
         args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h2 ||
         args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_hp1 ||
@@ -2781,7 +2804,6 @@ namespace ggml { namespace gemmini {
     if (args->tile_I == 0 || args->tile_J == 0 || args->tile_K == 0)
       gemmini_set_tile_ws(args);
 
-    const char *layer = ggml::gemmini::types::to_string(args->layer_type);
     const uint64_t start = ggml::gemmini::cycle::read();
     const elem_t *A = args->A;
     const elem_t *B = args->B;
