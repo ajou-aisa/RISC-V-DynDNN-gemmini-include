@@ -13,6 +13,7 @@
 #include <limits.h>
 #include <stdbool.h>
 #include <algorithm>
+#include <optional>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -35,7 +36,7 @@
 #include "gemmini_counter.h"
 
 #include "ggml-gemmini-args.h"
-#include <gemmini/log.h>
+#include <gemmini/log.hpp>
 #include <gemmini/cycle_reader.hpp>
 #include <gemmini/layer.hpp>
 #include "quants/stripe.hpp"
@@ -91,8 +92,8 @@
 #ifndef GEMMINI_WS_DEBUG
 #define GEMMINI_WS_DEBUG 0
 #endif
-#ifndef GEMMINI_WS_LOOP_DEBUG
-#define GEMMINI_WS_LOOP_DEBUG 0
+#ifndef GEMMINI_WS_LOOP_CYCLE
+#define GEMMINI_WS_LOOP_CYCLE 0
 #endif
 #ifndef GEMMINI_DISABLE_WS_REUSE
 #define GEMMINI_DISABLE_WS_REUSE 0
@@ -872,10 +873,12 @@ static void tiled_matmul_outer(size_t dim_I, size_t dim_J, size_t dim_K,
 
   size_t ws_call_idx = 0;
 
-#if GEMMINI_WS_LOOP_DEBUG && defined(__riscv)
-  const bool ws_loop_debug = dataflow == WEIGHT_STATIONARY;
+#if GEMMINI_WS_LOOP_CYCLE && LOG_CYCLE && defined(__riscv)
+  const bool ws_loop_cycle = dataflow == WEIGHT_STATIONARY;
+  std::optional<ggml::gemmini::log::HardwareCounterLease> ws_counter_lease;
   uint64_t ws_loop_start = 0;
-  if (ws_loop_debug) {
+  if (ws_loop_cycle) {
+    ws_counter_lease.emplace();
     counter_configure(0, LOAD_ACTIVE_CYCLE);
     counter_configure(1, EXE_ACTIVE_CYCLE);
     counter_configure(2, STORE_ACTIVE_CYCLE);
@@ -955,13 +958,18 @@ static void tiled_matmul_outer(size_t dim_I, size_t dim_J, size_t dim_K,
 
   gemmini_fence();
 
-#if GEMMINI_WS_LOOP_DEBUG && defined(__riscv)
-  if (ws_loop_debug) {
+#if GEMMINI_WS_LOOP_CYCLE && LOG_CYCLE && defined(__riscv)
+  if (ws_loop_cycle) {
     const uint64_t ws_loop_end = ggml::gemmini::cycle::read();
     counter_snapshot_take();
-    gemmini_log_ws_loop(
+    const uint32_t load_occupancy_cycles = counter_read(0);
+    const uint32_t execute_occupancy_cycles = counter_read(1);
+    const uint32_t store_occupancy_cycles = counter_read(2);
+    const uint32_t loop_occupancy_cycles = counter_read(3);
+    gemmini_log_ws_cycle(
         ws_loop_end - ws_loop_start,
-        counter_read(0), counter_read(1), counter_read(2), counter_read(3),
+        load_occupancy_cycles, execute_occupancy_cycles,
+        store_occupancy_cycles, loop_occupancy_cycles,
         dim_I, dim_J, dim_K,
         tile_I, tile_J, tile_K,
         I0, J0, K0,
