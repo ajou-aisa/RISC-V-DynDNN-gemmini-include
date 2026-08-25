@@ -2464,13 +2464,13 @@ namespace ggml { namespace gemmini {
   }
 
   static void tiled_matmul_im2p_sw(struct ggml_gemmini_args_t *args) {
-    tiled_matmul_im2p_impl(args, true, "[tiled_matmul_auto_im2p] cpu.Q8_0_R tiled matmul");
+    tiled_matmul_im2p_impl(args, true, "cpu.matmul.im2p");
   }
 
   // IM2P WS simulation. target system.
   // activation: ExSIA, weight: hierarchical block
   static void tiled_matmul_im2p_ws(struct ggml_gemmini_args_t *args) {
-    tiled_matmul_im2p_impl(args, false, "[tiled_matmul_im2p_ws] ws-sim.Q8_0_R tiled matmul");
+    tiled_matmul_im2p_impl(args, false, "gemmini.matmul.im2p");
   }
 
   static void tiled_matmul_auto_im2p(struct ggml_gemmini_args_t *args) {
@@ -2570,35 +2570,25 @@ namespace ggml { namespace gemmini {
       baseline_weight_quant_t weight_quant) {
     static const baseline_route_t routes[] = {
       {baseline_activation_quant_t::EXSIA, baseline_weight_quant_t::TENSOR,
-       "[tiled_matmul_auto_A-exsia_B-tensor] cpu.dense_i8 tiled matmul",
-       "[tiled_matmul_auto_A-exsia_B-tensor] npu.dense_i8 tiled matmul"},
+       "cpu.matmul.exsia_tensor", "gemmini.matmul.exsia_tensor"},
       {baseline_activation_quant_t::TENSOR, baseline_weight_quant_t::TENSOR,
-       "[tiled_matmul_auto_A-tensor_B-tensor] cpu.dense_i8 tiled matmul",
-       "[tiled_matmul_auto_A-tensor_B-tensor] npu.dense_i8 tiled matmul"},
+       "cpu.matmul.tensor_tensor", "gemmini.matmul.tensor_tensor"},
       {baseline_activation_quant_t::TOKEN, baseline_weight_quant_t::TENSOR,
-       "[tiled_matmul_auto_A-token_B-tensor] cpu.dense_i8 tiled matmul",
-       "[tiled_matmul_auto_A-token_B-tensor] npu.dense_i8 tiled matmul"},
+       "cpu.matmul.token_tensor", "gemmini.matmul.token_tensor"},
       {baseline_activation_quant_t::TENSOR, baseline_weight_quant_t::CHANNEL,
-       "[tiled_matmul_auto_baseline] cpu.tensor_channel Q8_CHANNEL direct-read tiled matmul",
-       "[tiled_matmul_auto_baseline] npu.tensor_channel Q8_CHANNEL direct-read tiled matmul"},
+       "cpu.matmul.tensor_channel", "gemmini.matmul.tensor_channel"},
       {baseline_activation_quant_t::TENSOR, baseline_weight_quant_t::BLOCK,
-       "[tiled_matmul_auto_baseline] cpu.tensor_block dense_i8 tiled matmul",
-       "[tiled_matmul_auto_baseline] npu.tensor_block dense_i8 tiled matmul"},
+       "cpu.matmul.tensor_block", "gemmini.matmul.tensor_block"},
       {baseline_activation_quant_t::TOKEN, baseline_weight_quant_t::CHANNEL,
-       "[tiled_matmul_auto_baseline] cpu.token_channel Q8_CHANNEL direct-read tiled matmul",
-       "[tiled_matmul_auto_baseline] npu.token_channel Q8_CHANNEL direct-read tiled matmul"},
+       "cpu.matmul.token_channel", "gemmini.matmul.token_channel"},
       {baseline_activation_quant_t::TOKEN, baseline_weight_quant_t::BLOCK,
-       "[tiled_matmul_auto_baseline] cpu.token_block dense_i8 tiled matmul",
-       "[tiled_matmul_auto_baseline] npu.token_block dense_i8 tiled matmul"},
+       "cpu.matmul.token_block", "gemmini.matmul.token_block"},
       {baseline_activation_quant_t::BLOCK, baseline_weight_quant_t::TENSOR,
-       "[tiled_matmul_auto_baseline] cpu.block_tensor dense_i8 tiled matmul",
-       "[tiled_matmul_auto_baseline] npu.block_tensor dense_i8 tiled matmul"},
+       "cpu.matmul.block_tensor", "gemmini.matmul.block_tensor"},
       {baseline_activation_quant_t::BLOCK, baseline_weight_quant_t::CHANNEL,
-       "[tiled_matmul_auto_baseline] cpu.block_channel dense_i8 tiled matmul",
-       "[tiled_matmul_auto_baseline] npu.block_channel dense_i8 tiled matmul"},
+       "cpu.matmul.block_channel", "gemmini.matmul.block_channel"},
       {baseline_activation_quant_t::BLOCK, baseline_weight_quant_t::BLOCK,
-       "[tiled_matmul_auto_baseline] cpu.block_block dense_i8 tiled matmul",
-       "[tiled_matmul_auto_baseline] npu.block_block dense_i8 tiled matmul"},
+       "cpu.matmul.block_block", "gemmini.matmul.block_block"},
     };
 
     for (const auto &route : routes)
