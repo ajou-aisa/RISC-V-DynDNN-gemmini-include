@@ -13,6 +13,7 @@
 #include <limits.h>
 #include <stdbool.h>
 #include <algorithm>
+#include <optional>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -35,7 +36,7 @@
 #include "gemmini_counter.h"
 
 #include "ggml-gemmini-args.h"
-#include <gemmini/log.h>
+#include <gemmini/log.hpp>
 #include <gemmini/cycle_reader.hpp>
 #include <gemmini/layer.hpp>
 #include "quants/stripe.hpp"
@@ -91,8 +92,8 @@
 #ifndef GEMMINI_WS_DEBUG
 #define GEMMINI_WS_DEBUG 0
 #endif
-#ifndef GEMMINI_WS_LOOP_DEBUG
-#define GEMMINI_WS_LOOP_DEBUG 0
+#ifndef GEMMINI_WS_LOOP_CYCLE
+#define GEMMINI_WS_LOOP_CYCLE 0
 #endif
 #ifndef GEMMINI_DISABLE_WS_REUSE
 #define GEMMINI_DISABLE_WS_REUSE 0
@@ -872,10 +873,12 @@ static void tiled_matmul_outer(size_t dim_I, size_t dim_J, size_t dim_K,
 
   size_t ws_call_idx = 0;
 
-#if GEMMINI_WS_LOOP_DEBUG && defined(__riscv)
-  const bool ws_loop_debug = dataflow == WEIGHT_STATIONARY;
+#if GEMMINI_WS_LOOP_CYCLE && LOG_CYCLE && defined(__riscv)
+  const bool ws_loop_cycle = dataflow == WEIGHT_STATIONARY;
+  std::optional<ggml::gemmini::log::HardwareCounterLease> ws_counter_lease;
   uint64_t ws_loop_start = 0;
-  if (ws_loop_debug) {
+  if (ws_loop_cycle) {
+    ws_counter_lease.emplace();
     counter_configure(0, LOAD_ACTIVE_CYCLE);
     counter_configure(1, EXE_ACTIVE_CYCLE);
     counter_configure(2, STORE_ACTIVE_CYCLE);
@@ -955,13 +958,18 @@ static void tiled_matmul_outer(size_t dim_I, size_t dim_J, size_t dim_K,
 
   gemmini_fence();
 
-#if GEMMINI_WS_LOOP_DEBUG && defined(__riscv)
-  if (ws_loop_debug) {
+#if GEMMINI_WS_LOOP_CYCLE && LOG_CYCLE && defined(__riscv)
+  if (ws_loop_cycle) {
     const uint64_t ws_loop_end = ggml::gemmini::cycle::read();
     counter_snapshot_take();
-    gemmini_log_ws_loop(
+    const uint32_t load_occupancy_cycles = counter_read(0);
+    const uint32_t execute_occupancy_cycles = counter_read(1);
+    const uint32_t store_occupancy_cycles = counter_read(2);
+    const uint32_t loop_occupancy_cycles = counter_read(3);
+    gemmini_log_ws_cycle(
         ws_loop_end - ws_loop_start,
-        counter_read(0), counter_read(1), counter_read(2), counter_read(3),
+        load_occupancy_cycles, execute_occupancy_cycles,
+        store_occupancy_cycles, loop_occupancy_cycles,
         dim_I, dim_J, dim_K,
         tile_I, tile_J, tile_K,
         I0, J0, K0,
@@ -1760,12 +1768,17 @@ namespace ggml { namespace gemmini {
   // TODO: 김동현
   static void tiled_matmul_auto_fp(struct ggml_gemmini_args_t *args)
   {
-    const char *layer = ggml::gemmini::types::to_string(args->layer_type);
+    if (args == NULL)
+      return;
+
+    const char *layer = args->matmul_layer.c_str();
+#if defined(GGML_GEMMINI_TEST_OBSERVER)
+    if (test_observe_semantic_layer(TestSemanticLayerSite::physical_auto_fp, layer))
+      return;
+#endif
 
     // tile size와 block size 매칭을 통해, tiled별 연산 결과를 dequantize해서 llama.cpp의 output으로 전달
     uint64_t start = ggml::gemmini::cycle::read();
-    if (args == NULL)
-      return;
 
     const size_t dim_I = args->I;
     const size_t dim_J = args->J;
@@ -1843,12 +1856,17 @@ namespace ggml { namespace gemmini {
   }
 
   static void gemmini_set_tile_ws(struct ggml_gemmini_args_t *args){
-    const char *layer = ggml::gemmini::types::to_string(args->layer_type);
+    if (args == NULL)
+      return;
+
+    const char *layer = args->matmul_layer.c_str();
+#if defined(GGML_GEMMINI_TEST_OBSERVER)
+    if (test_observe_semantic_layer(TestSemanticLayerSite::physical_set_tile_ws, layer))
+      return;
+#endif
 
     // tile size 계산
     uint64_t start = ggml::gemmini::cycle::read();
-    if (args == NULL)
-      return;
 
     const size_t dim_I = args->I;
     const size_t dim_J = args->J;
@@ -1975,7 +1993,11 @@ namespace ggml { namespace gemmini {
     if (args == NULL)
       return;
 
-    const char *layer = ggml::gemmini::types::to_string(args->layer_type);
+    const char *layer = args->matmul_layer.c_str();
+#if defined(GGML_GEMMINI_TEST_OBSERVER)
+    if (test_observe_semantic_layer(TestSemanticLayerSite::physical_im2p_impl, layer))
+      return;
+#endif
     const bool native_q8 = args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h1 ||
         args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h2 ||
         args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_hp1 ||
@@ -2442,20 +2464,24 @@ namespace ggml { namespace gemmini {
   }
 
   static void tiled_matmul_im2p_sw(struct ggml_gemmini_args_t *args) {
-    tiled_matmul_im2p_impl(args, true, "[tiled_matmul_auto_im2p] cpu.Q8_0_R tiled matmul");
+    tiled_matmul_im2p_impl(args, true, "cpu.matmul.im2p");
   }
 
   // IM2P WS simulation. target system.
   // activation: ExSIA, weight: hierarchical block
   static void tiled_matmul_im2p_ws(struct ggml_gemmini_args_t *args) {
-    tiled_matmul_im2p_impl(args, false, "[tiled_matmul_im2p_ws] ws-sim.Q8_0_R tiled matmul");
+    tiled_matmul_im2p_impl(args, false, "gemmini.matmul.im2p");
   }
 
   static void tiled_matmul_auto_im2p(struct ggml_gemmini_args_t *args) {
     if (args == NULL)
       return;
 
-    const char *layer = ggml::gemmini::types::to_string(args->layer_type);
+    const char *layer = args->matmul_layer.c_str();
+#if defined(GGML_GEMMINI_TEST_OBSERVER)
+    if (test_observe_semantic_layer(TestSemanticLayerSite::physical_auto_im2p, layer))
+      return;
+#endif
     const char *cpu_cycle_label = nullptr;
     const char *ws_cycle_label = nullptr;
     const char *os_message = nullptr;
@@ -2544,35 +2570,25 @@ namespace ggml { namespace gemmini {
       baseline_weight_quant_t weight_quant) {
     static const baseline_route_t routes[] = {
       {baseline_activation_quant_t::EXSIA, baseline_weight_quant_t::TENSOR,
-       "[tiled_matmul_auto_A-exsia_B-tensor] cpu.dense_i8 tiled matmul",
-       "[tiled_matmul_auto_A-exsia_B-tensor] npu.dense_i8 tiled matmul"},
+       "cpu.matmul.exsia_tensor", "gemmini.matmul.exsia_tensor"},
       {baseline_activation_quant_t::TENSOR, baseline_weight_quant_t::TENSOR,
-       "[tiled_matmul_auto_A-tensor_B-tensor] cpu.dense_i8 tiled matmul",
-       "[tiled_matmul_auto_A-tensor_B-tensor] npu.dense_i8 tiled matmul"},
+       "cpu.matmul.tensor_tensor", "gemmini.matmul.tensor_tensor"},
       {baseline_activation_quant_t::TOKEN, baseline_weight_quant_t::TENSOR,
-       "[tiled_matmul_auto_A-token_B-tensor] cpu.dense_i8 tiled matmul",
-       "[tiled_matmul_auto_A-token_B-tensor] npu.dense_i8 tiled matmul"},
+       "cpu.matmul.token_tensor", "gemmini.matmul.token_tensor"},
       {baseline_activation_quant_t::TENSOR, baseline_weight_quant_t::CHANNEL,
-       "[tiled_matmul_auto_baseline] cpu.tensor_channel Q8_CHANNEL direct-read tiled matmul",
-       "[tiled_matmul_auto_baseline] npu.tensor_channel Q8_CHANNEL direct-read tiled matmul"},
+       "cpu.matmul.tensor_channel", "gemmini.matmul.tensor_channel"},
       {baseline_activation_quant_t::TENSOR, baseline_weight_quant_t::BLOCK,
-       "[tiled_matmul_auto_baseline] cpu.tensor_block dense_i8 tiled matmul",
-       "[tiled_matmul_auto_baseline] npu.tensor_block dense_i8 tiled matmul"},
+       "cpu.matmul.tensor_block", "gemmini.matmul.tensor_block"},
       {baseline_activation_quant_t::TOKEN, baseline_weight_quant_t::CHANNEL,
-       "[tiled_matmul_auto_baseline] cpu.token_channel Q8_CHANNEL direct-read tiled matmul",
-       "[tiled_matmul_auto_baseline] npu.token_channel Q8_CHANNEL direct-read tiled matmul"},
+       "cpu.matmul.token_channel", "gemmini.matmul.token_channel"},
       {baseline_activation_quant_t::TOKEN, baseline_weight_quant_t::BLOCK,
-       "[tiled_matmul_auto_baseline] cpu.token_block dense_i8 tiled matmul",
-       "[tiled_matmul_auto_baseline] npu.token_block dense_i8 tiled matmul"},
+       "cpu.matmul.token_block", "gemmini.matmul.token_block"},
       {baseline_activation_quant_t::BLOCK, baseline_weight_quant_t::TENSOR,
-       "[tiled_matmul_auto_baseline] cpu.block_tensor dense_i8 tiled matmul",
-       "[tiled_matmul_auto_baseline] npu.block_tensor dense_i8 tiled matmul"},
+       "cpu.matmul.block_tensor", "gemmini.matmul.block_tensor"},
       {baseline_activation_quant_t::BLOCK, baseline_weight_quant_t::CHANNEL,
-       "[tiled_matmul_auto_baseline] cpu.block_channel dense_i8 tiled matmul",
-       "[tiled_matmul_auto_baseline] npu.block_channel dense_i8 tiled matmul"},
+       "cpu.matmul.block_channel", "gemmini.matmul.block_channel"},
       {baseline_activation_quant_t::BLOCK, baseline_weight_quant_t::BLOCK,
-       "[tiled_matmul_auto_baseline] cpu.block_block dense_i8 tiled matmul",
-       "[tiled_matmul_auto_baseline] npu.block_block dense_i8 tiled matmul"},
+       "cpu.matmul.block_block", "gemmini.matmul.block_block"},
     };
 
     for (const auto &route : routes)
@@ -2696,6 +2712,11 @@ namespace ggml { namespace gemmini {
     if (args == nullptr || args->A == nullptr || args->f_out == nullptr)
       return;
 
+    const char *layer = args->matmul_layer.c_str();
+#if defined(GGML_GEMMINI_TEST_OBSERVER)
+    if (test_observe_semantic_layer(TestSemanticLayerSite::physical_baseline_dense, layer))
+      return;
+#endif
     const bool native_q8 = args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h1 ||
         args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h2 ||
         args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_hp1 ||
@@ -2773,7 +2794,6 @@ namespace ggml { namespace gemmini {
     if (args->tile_I == 0 || args->tile_J == 0 || args->tile_K == 0)
       gemmini_set_tile_ws(args);
 
-    const char *layer = ggml::gemmini::types::to_string(args->layer_type);
     const uint64_t start = ggml::gemmini::cycle::read();
     const elem_t *A = args->A;
     const elem_t *B = args->B;
