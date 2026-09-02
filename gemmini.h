@@ -1989,14 +1989,23 @@ namespace ggml { namespace gemmini {
     return std::max(1, exsia_threads);
   }
 
-  static void tiled_matmul_im2p_impl(struct ggml_gemmini_args_t *args, bool use_cpu_dot, const char *cycle_label) {
+  enum class DenseMatmulStatus : uint8_t {
+    success,
+    invalid_contract,
+    unsupported,
+  };
+
+  static DenseMatmulStatus tiled_matmul_im2p_impl(
+      struct ggml_gemmini_args_t *args,
+      bool use_cpu_dot,
+      const char *cycle_label) {
     if (args == NULL)
-      return;
+      return DenseMatmulStatus::invalid_contract;
 
     const char *layer = args->matmul_layer.c_str();
 #if defined(GGML_GEMMINI_TEST_OBSERVER)
     if (test_observe_semantic_layer(TestSemanticLayerSite::physical_im2p_impl, layer))
-      return;
+      return DenseMatmulStatus::success;
 #endif
     const bool native_q8 = args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h1 ||
         args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h2 ||
@@ -2006,23 +2015,23 @@ namespace ggml { namespace gemmini {
     uint64_t start = ggml::gemmini::cycle::read();
 
     if (args->A == nullptr || args->f_out == nullptr)
-      return;
+      return DenseMatmulStatus::invalid_contract;
 
     if (!native_q8 && (args->B == nullptr || args->c_b == nullptr))
-      return;
+      return DenseMatmulStatus::invalid_contract;
 
     if (!native_q8)
     {
       const size_t stripe_J_check = args->stripe_J_or_rowwise_elems();
       if (stripe_J_check > 1)
       {
-        if (args->s_rf_stripe == nullptr || args->R_stripe == nullptr)
-          return;
+      if (args->s_rf_stripe == nullptr || args->R_stripe == nullptr)
+        return DenseMatmulStatus::invalid_contract;
       }
       else
       {
-        if (args->s_rf == nullptr || args->R == nullptr)
-          return;
+      if (args->s_rf == nullptr || args->R == nullptr)
+        return DenseMatmulStatus::invalid_contract;
       }
     }
 
@@ -2033,7 +2042,7 @@ namespace ggml { namespace gemmini {
     const size_t dim_J = args->J;
     const size_t dim_K = args->K;
     if (dim_I == 0 || dim_J == 0 || dim_K == 0 || args->blocks_per_row == 0)
-      return;
+      return DenseMatmulStatus::invalid_contract;
 
     GGML_ASSERT(args->act == NO_ACTIVATION);
 
@@ -2046,7 +2055,7 @@ namespace ggml { namespace gemmini {
              args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_hp2)
       block_size_k = static_cast<size_t>(QK8_HP);
     if (block_size_k == 0)
-      return;
+      return DenseMatmulStatus::invalid_contract;
 
     const size_t tile_I = args->tile_I;
     const size_t tile_J = args->tile_J;
@@ -2073,7 +2082,7 @@ namespace ggml { namespace gemmini {
         gemmini_log_debug_layer(layer,
             "[tiled_block_matmul_auto] reject STRIPE activation scale cardinality: got=%zu expected=%zu",
             stripe_meta->scales.size(), expected_scale_count);
-        return;
+        return DenseMatmulStatus::invalid_contract;
       }
       for (const float scale : stripe_meta->scales)
       {
@@ -2082,7 +2091,7 @@ namespace ggml { namespace gemmini {
           gemmini_log_debug_layer(layer,
               "[tiled_block_matmul_auto] reject STRIPE activation scale value: scale=%g",
               static_cast<double>(scale));
-          return;
+          return DenseMatmulStatus::invalid_contract;
         }
       }
     }
@@ -2110,7 +2119,7 @@ namespace ggml { namespace gemmini {
       if (!valid_format)
       {
         gemmini_log_debug_layer(layer, "[tiled_block_matmul_auto] reject native Q8 contract: format=%d", static_cast<int>(args->weight_format));
-        return;
+        return DenseMatmulStatus::invalid_contract;
       }
     }
 
@@ -2120,7 +2129,7 @@ namespace ggml { namespace gemmini {
       for (size_t tile_i_idx = 0; tile_i_idx < num_i_tiles; ++tile_i_idx)
       {
         if (activation_meta->resolve_stripe_theta(static_cast<int>(tile_i_idx)) == invalid_theta)
-          return;
+          return DenseMatmulStatus::invalid_contract;
       }
     }
 
@@ -2136,7 +2145,7 @@ namespace ggml { namespace gemmini {
       gemmini_log_debug_layer(layer,
           "[tiled_block_matmul_auto] reject stripe mode contract: stripe_J=%zu tile_J_elems=%zu",
           args->stripe_J, tile_J * DIM);
-      return;
+      return DenseMatmulStatus::invalid_contract;
     }
 
     gemmini_log_debug_layer(layer,
@@ -2148,7 +2157,7 @@ namespace ggml { namespace gemmini {
     const size_t stride_A = args->sA ? args->sA : dim_K;
     const size_t row_stride_B = args->sB;
     if (!native_q8 && row_stride_B == 0)
-      return;
+      return DenseMatmulStatus::invalid_contract;
 
     const int16_t activation_e_s = activation_meta ? activation_meta->e_s : 0;
     const int16_t activation_rho = activation_meta ? activation_meta->rho : 0;
@@ -2461,26 +2470,27 @@ namespace ggml { namespace gemmini {
 
     uint64_t end = ggml::gemmini::cycle::read();
     gemmini_log_cycle(layer, cycle_label, start, end);
+    return DenseMatmulStatus::success;
   }
 
-  static void tiled_matmul_im2p_sw(struct ggml_gemmini_args_t *args) {
-    tiled_matmul_im2p_impl(args, true, "cpu.matmul.im2p");
+  static DenseMatmulStatus tiled_matmul_im2p_sw(struct ggml_gemmini_args_t *args) {
+    return tiled_matmul_im2p_impl(args, true, "cpu.matmul.im2p");
   }
 
   // IM2P WS simulation. target system.
   // activation: ExSIA, weight: hierarchical block
-  static void tiled_matmul_im2p_ws(struct ggml_gemmini_args_t *args) {
-    tiled_matmul_im2p_impl(args, false, "gemmini.matmul.im2p");
+  static DenseMatmulStatus tiled_matmul_im2p_ws(struct ggml_gemmini_args_t *args) {
+    return tiled_matmul_im2p_impl(args, false, "gemmini.matmul.im2p");
   }
 
-  static void tiled_matmul_auto_im2p(struct ggml_gemmini_args_t *args) {
+  static DenseMatmulStatus tiled_matmul_auto_im2p(struct ggml_gemmini_args_t *args) {
     if (args == NULL)
-      return;
+      return DenseMatmulStatus::invalid_contract;
 
     const char *layer = args->matmul_layer.c_str();
 #if defined(GGML_GEMMINI_TEST_OBSERVER)
     if (test_observe_semantic_layer(TestSemanticLayerSite::physical_auto_im2p, layer))
-      return;
+      return DenseMatmulStatus::success;
 #endif
     const char *cpu_cycle_label = nullptr;
     const char *ws_cycle_label = nullptr;
@@ -2509,38 +2519,39 @@ namespace ggml { namespace gemmini {
         os_message = "[tiled_matmul_auto_im2p] Q8_HP2 OS mode is unsupported";
         break;
       case ggml_gemmini_args_t::im2p_weight_format_t::q8_channel:
-        if (!args->has_q8_channel_direct_read_contract())
+        if (!args->has_q8_channel_direct_read_contract()) {
           gemmini_log_debug_layer(layer,
               "[tiled_matmul_auto_im2p] reject malformed Q8_CHANNEL direct-read contract");
-        else
+          return DenseMatmulStatus::invalid_contract;
+        } else {
           gemmini_log_debug_layer(layer,
               "[tiled_matmul_auto_im2p] Q8_CHANNEL direct-read requires baseline/DEC software route; IM2P hardware subroute would require repack");
-        return;
+          return DenseMatmulStatus::unsupported;
+        }
       case ggml_gemmini_args_t::im2p_weight_format_t::q8_h0:
         gemmini_log_debug_layer(
             layer,
             "[tiled_matmul_auto_im2p] unsupported IM2P weight format=%d (not yet implemented in software path)",
             static_cast<int>(args->weight_format));
-        return;
+        return DenseMatmulStatus::unsupported;
       default:
         gemmini_log_debug_layer(layer,
             "[tiled_matmul_auto_im2p] unsupported IM2P weight format=%d",
             static_cast<int>(args->weight_format));
-        return;
+        return DenseMatmulStatus::unsupported;
     }
 
     if (args->tiled_matmul_type == CPU)
     {
-      tiled_matmul_im2p_impl(args, true, cpu_cycle_label);
-      return;
+      return tiled_matmul_im2p_impl(args, true, cpu_cycle_label);
     }
     if (args->tiled_matmul_type == WS)
     {
-      tiled_matmul_im2p_impl(args, false, ws_cycle_label);
-      return;
+      return tiled_matmul_im2p_impl(args, false, ws_cycle_label);
     }
 
     gemmini_log_debug_layer(layer, os_message);
+    return DenseMatmulStatus::unsupported;
   }
 
   enum class baseline_activation_quant_t : uint8_t {
@@ -2706,16 +2717,16 @@ namespace ggml { namespace gemmini {
     return scales.size() == args.I;
   }
 
-  static void tiled_matmul_auto_baseline_dense(
+  static DenseMatmulStatus tiled_matmul_auto_baseline_dense(
       struct ggml_gemmini_args_t *args,
       const baseline_route_t &route) {
     if (args == nullptr || args->A == nullptr || args->f_out == nullptr)
-      return;
+      return DenseMatmulStatus::invalid_contract;
 
     const char *layer = args->matmul_layer.c_str();
 #if defined(GGML_GEMMINI_TEST_OBSERVER)
     if (test_observe_semantic_layer(TestSemanticLayerSite::physical_baseline_dense, layer))
-      return;
+      return DenseMatmulStatus::success;
 #endif
     const bool native_q8 = args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h1 ||
         args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h2 ||
@@ -2723,24 +2734,23 @@ namespace ggml { namespace gemmini {
         args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_hp2;
     if (route.activation_quant == baseline_activation_quant_t::TENSOR &&
         route.weight_quant == baseline_weight_quant_t::TENSOR && native_q8) {
-      tiled_matmul_im2p_impl(args, args->tiled_matmul_type == CPU,
+      return tiled_matmul_im2p_impl(args, args->tiled_matmul_type == CPU,
           "[tiled_matmul_auto_A-tensor_B-native-q8] tiled matmul");
-      return;
     }
 
     if (args->B == nullptr)
-      return;
+      return DenseMatmulStatus::invalid_contract;
 
     const size_t dim_I = args->I;
     const size_t dim_J = args->J;
     const size_t dim_K = args->K;
     if (dim_I == 0 || dim_J == 0 || dim_K == 0 || args->sB == 0)
-      return;
+      return DenseMatmulStatus::invalid_contract;
 
     if (route.activation_quant == baseline_activation_quant_t::EXSIA &&
         route.weight_quant == baseline_weight_quant_t::TENSOR &&
         (!args->weight_i8_scale_active || !std::isfinite(args->weight_scale)))
-      return;
+      return DenseMatmulStatus::invalid_contract;
 
     const bool q8_channel_route = route.weight_quant == baseline_weight_quant_t::CHANNEL;
     const bool q8_channel_direct_read = q8_channel_route &&
@@ -2748,7 +2758,7 @@ namespace ggml { namespace gemmini {
     const bool q8_channel_dense_sidecar = q8_channel_route &&
         args->has_q8_channel_dense_sidecar_contract();
     if (q8_channel_route && !q8_channel_direct_read && !q8_channel_dense_sidecar)
-      return;
+      return DenseMatmulStatus::invalid_contract;
 
     if (route.activation_quant == baseline_activation_quant_t::TOKEN) {
       if (q8_channel_route) {
@@ -2769,17 +2779,17 @@ namespace ggml { namespace gemmini {
 
     if (route.weight_quant == baseline_weight_quant_t::TENSOR &&
         args->weight_i8_scale_active && !std::isfinite(args->weight_scale))
-      return;
+      return DenseMatmulStatus::invalid_contract;
 
     GGML_ASSERT(args->act == NO_ACTIVATION);
 
     std::vector<float> activation_scales;
     if (!baseline_activation_scale_provider(*args, route.activation_quant, activation_scales))
-      return;
+      return DenseMatmulStatus::invalid_contract;
 
     const size_t block_size = args->block_size_k ? args->block_size_k : GGML_GEMMINI_BLOCK_SIZE;
     if (block_size == 0 || dim_K > std::numeric_limits<size_t>::max() - (block_size - 1))
-      return;
+      return DenseMatmulStatus::invalid_contract;
     const size_t weight_block_count = route.weight_quant == baseline_weight_quant_t::BLOCK ?
         (dim_K + block_size - 1) / block_size : 1;
     for (size_t j = 0; j < dim_J; ++j)
@@ -2787,7 +2797,7 @@ namespace ggml { namespace gemmini {
         float ignored_scale = 0.0f;
         if (route.weight_quant != baseline_weight_quant_t::TENSOR || args->weight_i8_scale_active) {
           if (!baseline_weight_scale_provider(*args, route.weight_quant, j, k_block, ignored_scale))
-            return;
+            return DenseMatmulStatus::invalid_contract;
         }
       }
 
@@ -2834,7 +2844,7 @@ namespace ggml { namespace gemmini {
             if (block_weight_route) {
               float weight_scale = 0.0f;
               if (!baseline_weight_scale_provider(*args, route.weight_quant, j, k / block_size, weight_scale))
-                return;
+                return DenseMatmulStatus::invalid_contract;
               block_acc[i * dim_J + j] += static_cast<double>(product) * weight_scale;
             } else {
               acc += product;
@@ -2856,7 +2866,7 @@ namespace ggml { namespace gemmini {
           } else {
             float weight_scale = 0.0f;
             if (!baseline_weight_scale_provider(*args, route.weight_quant, j, 0, weight_scale))
-              return;
+              return DenseMatmulStatus::invalid_contract;
             args->f_out[output_offset] += static_cast<float>(
                 static_cast<double>(acc32[i * dim_J + j]) * weight_scale * activation_scales[i]);
           }
@@ -2867,35 +2877,40 @@ namespace ggml { namespace gemmini {
     gemmini_log_cycle(layer,
         args->tiled_matmul_type == CPU ? route.cpu_cycle_label : route.npu_cycle_label,
         start, end);
+    return DenseMatmulStatus::success;
   }
 
-  static void tiled_matmul_auto_A_exsia_B_tensor(struct ggml_gemmini_args_t *args) {
-    tiled_matmul_auto_baseline_dense(args, *baseline_route_for(
+  static DenseMatmulStatus tiled_matmul_auto_A_exsia_B_tensor(struct ggml_gemmini_args_t *args) {
+    return tiled_matmul_auto_baseline_dense(args, *baseline_route_for(
         baseline_activation_quant_t::EXSIA, baseline_weight_quant_t::TENSOR));
   }
 
-  static void tiled_matmul_auto_A_tensor_B_tensor(struct ggml_gemmini_args_t *args) {
-    tiled_matmul_auto_baseline_dense(args, *baseline_route_for(
+  static DenseMatmulStatus tiled_matmul_auto_A_tensor_B_tensor(struct ggml_gemmini_args_t *args) {
+    return tiled_matmul_auto_baseline_dense(args, *baseline_route_for(
         baseline_activation_quant_t::TENSOR, baseline_weight_quant_t::TENSOR));
   }
 
-  static void tiled_matmul_auto_A_token_B_tensor(struct ggml_gemmini_args_t *args) {
-    tiled_matmul_auto_baseline_dense(args, *baseline_route_for(
+  static DenseMatmulStatus tiled_matmul_auto_A_token_B_tensor(struct ggml_gemmini_args_t *args) {
+    return tiled_matmul_auto_baseline_dense(args, *baseline_route_for(
         baseline_activation_quant_t::TOKEN, baseline_weight_quant_t::TENSOR));
   }
 
-  static void tiled_matmul_auto_baseline(struct ggml_gemmini_args_t *args,
-                                         baseline_activation_quant_t activation_quant,
-                                         baseline_weight_quant_t weight_quant) {
+  static DenseMatmulStatus tiled_matmul_auto_baseline(
+      struct ggml_gemmini_args_t *args,
+      baseline_activation_quant_t activation_quant,
+      baseline_weight_quant_t weight_quant) {
     if (activation_quant == baseline_activation_quant_t::FLOAT &&
         weight_quant == baseline_weight_quant_t::FLOAT) {
+      if (args == nullptr)
+        return DenseMatmulStatus::invalid_contract;
       tiled_matmul_auto_fp(args);
-      return;
+      return DenseMatmulStatus::success;
     }
 
     const baseline_route_t *route = baseline_route_for(activation_quant, weight_quant);
-    GGML_ASSERT(route != nullptr && "unsupported Gemmini baseline quantization pair");
-    tiled_matmul_auto_baseline_dense(args, *route);
+    if (route == nullptr)
+      return DenseMatmulStatus::unsupported;
+    return tiled_matmul_auto_baseline_dense(args, *route);
   }
 
 }} // namespace ggml::gemmini
