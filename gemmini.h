@@ -2007,7 +2007,12 @@ namespace ggml { namespace gemmini {
     if (test_observe_semantic_layer(TestSemanticLayerSite::physical_im2p_impl, layer))
       return DenseMatmulStatus::success;
 #endif
-    const bool native_q8 = args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h1 ||
+    // H0: GGUF Q8_0/Q4_0 blocks as stored; fp16 d is the floating block scale.
+    // Q4_0 nibbles are decoded to int8 codes, so both share the native hot loop.
+    const bool h0 = args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h0 ||
+        args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q4_h0;
+    const bool native_q8 = h0 ||
+        args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h1 ||
         args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h2 ||
         args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_hp1 ||
         args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_hp2;
@@ -2041,7 +2046,12 @@ namespace ggml { namespace gemmini {
     const size_t dim_I = args->I;
     const size_t dim_J = args->J;
     const size_t dim_K = args->K;
-    if (dim_I == 0 || dim_J == 0 || dim_K == 0 || args->blocks_per_row == 0)
+    // H0 row geometry lives where its contract validates it (as in the weight reader).
+    const size_t blocks_per_row =
+        args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q4_h0 ? args->native_blocks_per_row
+        : args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h0 ? args->blocks_K
+                                                                                  : args->blocks_per_row;
+    if (dim_I == 0 || dim_J == 0 || dim_K == 0 || blocks_per_row == 0)
       return DenseMatmulStatus::invalid_contract;
 
     GGML_ASSERT(args->act == NO_ACTIVATION);
@@ -2112,6 +2122,12 @@ namespace ggml { namespace gemmini {
         case ggml_gemmini_args_t::im2p_weight_format_t::q8_hp2:
           valid_format = args->has_q8_hp2_im2p_contract();
           break;
+        case ggml_gemmini_args_t::im2p_weight_format_t::q8_h0:
+          valid_format = args->has_q8_h0_contract();
+          break;
+        case ggml_gemmini_args_t::im2p_weight_format_t::q4_h0:
+          valid_format = args->has_native_matched_width_contract();
+          break;
         default:
           valid_format = false;
           break;
@@ -2133,6 +2149,18 @@ namespace ggml { namespace gemmini {
       }
     }
 
+    // BLOCK activation: one fp32 scale per (row, 32-K block), applied to every
+    // native block dot before accumulation (block x block, then dequantize).
+    std::optional<ggml::gemmini::quants::act::ActivationMetadataView> block_scales;
+    if (native_q8 &&
+        std::holds_alternative<ggml::gemmini::quants::act::block::Meta>(args->act_quant.storage()))
+    {
+      block_scales.emplace(*args, args->activation_row_offset,
+                           args->activation_row_offset + dim_I);
+      if (block_size_k != ggml::gemmini::quants::act::block::kGroupSize || !block_scales->valid())
+        return DenseMatmulStatus::invalid_contract;
+    }
+
     for (size_t i = 0; i < dim_I; ++i)
     {
       float *row_out = args->f_out + i * out_row_stride;
@@ -2150,7 +2178,7 @@ namespace ggml { namespace gemmini {
 
     gemmini_log_debug_layer(layer,
         "[tiled_block_matmul_auto] dim=(I=%zu,J=%zu,K=%zu) tile_size: A=(I=%zu x K=%zu) B=(J=%zu x K=%zu) | num_tiles: I=%zu J=%zu K=%zu blocks_per_row=%zu stripe_J=%zu",
-        dim_I, dim_J, dim_K, tile_I * DIM, tile_K * DIM, tile_J * DIM, tile_K * DIM, num_i_tiles, num_j_tiles, num_tile_ks, args->blocks_per_row, stripe_J);
+        dim_I, dim_J, dim_K, tile_I * DIM, tile_K * DIM, tile_J * DIM, tile_K * DIM, num_i_tiles, num_j_tiles, num_tile_ks, blocks_per_row, stripe_J);
 
     const elem_t *A = args->A;
     const elem_t *B = args->B;
@@ -2179,6 +2207,7 @@ namespace ggml { namespace gemmini {
       static thread_local std::vector<int32_t> a_tile_i32;
       static thread_local std::vector<int64_t> acc32;
       static thread_local std::vector<double> acc_fp;
+      static thread_local std::vector<int8_t> q4_h0_codes;  // one decoded Q4_0 block per column
 
       const size_t tile_i = tile_i_idx * tile_I * DIM;
       const size_t tile_j = tile_j_idx * tile_J * DIM;
@@ -2248,7 +2277,7 @@ namespace ggml { namespace gemmini {
           const size_t k_in_weight_block = global_k % block_size_k;
           const size_t block_k_actual = std::min(block_size_k - k_in_weight_block, tile_k_actual - k_block);
           const size_t weight_blk = global_k / block_size_k;
-          if (weight_blk >= args->blocks_per_row)
+          if (weight_blk >= blocks_per_row)
           {
             k_block += block_k_actual;
             continue;
@@ -2258,6 +2287,8 @@ namespace ggml { namespace gemmini {
           {
             native_scale_lut.assign(tile_j_actual, 0.0);
             native_qs_lut.assign(tile_j_actual, nullptr);
+            if (args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q4_h0)
+              q4_h0_codes.resize(tile_j_actual * QK4_0);
             for (size_t j = 0; j < tile_j_actual; ++j)
             {
               const size_t global_j = tile_j + j;
@@ -2284,9 +2315,51 @@ namespace ggml { namespace gemmini {
                   if (b) { native_scale_lut[j] = b->m == INT16_MIN ? 0.0 : static_cast<double>(gemmini_ldexp_fast_pos(b->channel_scale, b->m));
                       native_qs_lut[j] = b->qs; }
                   break; }
+                case ggml_gemmini_args_t::im2p_weight_format_t::q8_h0: {
+                  const block_q8_0 *b = args->B_blocks + global_j * blocks_per_row + weight_blk;
+                  native_scale_lut[j] = static_cast<double>(ggml_fp16_to_fp32(b->d));
+                  native_qs_lut[j] = b->qs;
+                  break; }
+                case ggml_gemmini_args_t::im2p_weight_format_t::q4_h0: {
+                  // GGUF Q4_0 nibbles: low -> q[t], high -> q[t + 16], offset 8.
+                  const block_q4_0 *b = args->q4_h0_blocks + global_j * blocks_per_row + weight_blk;
+                  int8_t *codes = q4_h0_codes.data() + j * QK4_0;
+                  for (size_t t = 0; t < QK4_0 / 2; ++t) {
+                    codes[t] = static_cast<int8_t>((b->qs[t] & 0x0F) - 8);
+                    codes[t + QK4_0 / 2] = static_cast<int8_t>((b->qs[t] >> 4) - 8);
+                  }
+                  native_scale_lut[j] = static_cast<double>(ggml_fp16_to_fp32(b->d));
+                  native_qs_lut[j] = codes;
+                  break; }
                 default: break;
               }
             }
+          }
+
+          if (block_scales)
+          {
+            // Separate from the loop below so its non-BLOCK codegen (-ffast-math) stays as is.
+            for (size_t i = 0; i < tile_i_actual; ++i)
+            {
+              float activation_block_scale = 1.0f;
+              const bool scale_ok = block_scales->scale(tile_i + i, global_k, activation_block_scale);
+              GGML_ASSERT(scale_ok);
+              const int32_t *a_row_i32 = a_tile_i32.data() + i * tile_k_padded + k_block;
+              for (size_t j = 0; j < tile_j_actual; ++j)
+              {
+                const int8_t *qs = native_qs_lut[j];
+                if (tile_j + j >= scale_rows || qs == nullptr)
+                  continue;
+
+                int32_t block_dot = 0;
+                for (size_t kk = 0; kk < block_k_actual; ++kk)
+                  block_dot += a_row_i32[kk] * static_cast<int32_t>(qs[k_in_weight_block + kk]);
+                acc_fp[i * tile_j_actual + j] += static_cast<double>(block_dot) *
+                    (native_scale_lut[j] * static_cast<double>(activation_block_scale));
+              }
+            }
+            k_block += block_k_actual;
+            continue;
           }
 
           for (size_t i = 0; i < tile_i_actual; ++i)
@@ -2529,11 +2602,20 @@ namespace ggml { namespace gemmini {
           return DenseMatmulStatus::unsupported;
         }
       case ggml_gemmini_args_t::im2p_weight_format_t::q8_h0:
-        gemmini_log_debug_layer(
-            layer,
-            "[tiled_matmul_auto_im2p] unsupported IM2P weight format=%d (not yet implemented in software path)",
-            static_cast<int>(args->weight_format));
-        return DenseMatmulStatus::unsupported;
+      case ggml_gemmini_args_t::im2p_weight_format_t::q4_h0:
+        // A floating fp16 block scale has no integer factor for the WS array:
+        // H0 runs block x block, then dequantize, on the CPU path only.
+        if (args->tiled_matmul_type != CPU)
+        {
+          gemmini_log_debug_layer(layer,
+              "[tiled_matmul_auto_im2p] H0 weight format=%d is CPU-only",
+              static_cast<int>(args->weight_format));
+          return DenseMatmulStatus::unsupported;
+        }
+        return tiled_matmul_im2p_impl(args, true,
+            args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h0
+                ? "[tiled_matmul_auto_im2p] cpu.Q8_0 tiled matmul"
+                : "[tiled_matmul_auto_im2p] cpu.Q4_0 tiled matmul");
       default:
         gemmini_log_debug_layer(layer,
             "[tiled_matmul_auto_im2p] unsupported IM2P weight format=%d",
