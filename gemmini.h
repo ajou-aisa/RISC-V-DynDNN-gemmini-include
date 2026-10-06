@@ -2012,7 +2012,6 @@ namespace ggml { namespace gemmini {
     const bool h0 = args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h0 ||
         args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q4_h0;
     const bool native_q8 = h0 ||
-        args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h1 ||
         args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h2 ||
         args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_hp1 ||
         args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_hp2;
@@ -2110,9 +2109,6 @@ namespace ggml { namespace gemmini {
     {
       bool valid_format = false;
       switch (args->weight_format) {
-        case ggml_gemmini_args_t::im2p_weight_format_t::q8_h1:
-          valid_format = args->has_q8_h1_im2p_contract();
-          break;
         case ggml_gemmini_args_t::im2p_weight_format_t::q8_h2:
           valid_format = args->has_q8_h2_im2p_contract();
           break;
@@ -2294,12 +2290,6 @@ namespace ggml { namespace gemmini {
               const size_t global_j = tile_j + j;
               if (global_j >= scale_rows) continue;
               switch (args->weight_format) {
-                case ggml_gemmini_args_t::im2p_weight_format_t::q8_h1: {
-                  const block_q8_h1 *b = args->q8_h1_block(global_j, weight_blk);
-                  if (b) { native_scale_lut[j] = static_cast<double>(b->s_rf) *
-                      static_cast<double>(static_cast<uint32_t>(b->c_b) + static_cast<uint32_t>(b->R));
-                      native_qs_lut[j] = b->qs; }
-                  break; }
                 case ggml_gemmini_args_t::im2p_weight_format_t::q8_h2: {
                   const block_q8_h2 *b = args->q8_h2_block(global_j, weight_blk);
                   if (b) { native_scale_lut[j] = static_cast<double>(b->channel_scale) * static_cast<double>(b->m) / 255.0;
@@ -2571,11 +2561,6 @@ namespace ggml { namespace gemmini {
 
     switch (args->weight_format)
     {
-      case ggml_gemmini_args_t::im2p_weight_format_t::q8_h1:
-        cpu_cycle_label = "[tiled_matmul_auto_im2p] cpu.Q8_H1 tiled matmul";
-        ws_cycle_label = "[tiled_matmul_im2p_ws] ws-sim.Q8_H1 tiled matmul";
-        os_message = "[tiled_matmul_auto_im2p] OS mode is unsupported";
-        break;
       case ggml_gemmini_args_t::im2p_weight_format_t::q8_h2:
         cpu_cycle_label = "[tiled_matmul_auto_im2p] cpu.Q8_H2 tiled matmul";
         ws_cycle_label = "[tiled_matmul_im2p_ws] ws-sim.Q8_H2 tiled matmul";
@@ -2810,8 +2795,7 @@ namespace ggml { namespace gemmini {
     if (test_observe_semantic_layer(TestSemanticLayerSite::physical_baseline_dense, layer))
       return DenseMatmulStatus::success;
 #endif
-    const bool native_q8 = args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h1 ||
-        args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h2 ||
+    const bool native_q8 = args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_h2 ||
         args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_hp1 ||
         args->weight_format == ggml_gemmini_args_t::im2p_weight_format_t::q8_hp2;
     if (route.activation_quant == baseline_activation_quant_t::TENSOR &&
